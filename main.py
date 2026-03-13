@@ -1,25 +1,25 @@
 import streamlit as st
 from st_supabase_connection import SupabaseConnection
 
-# Configuração da página
 st.set_page_config(page_title="Guardian - Gestão de Fundos", layout="wide")
-
 st.title("🛡️ Guardian: Carteira Diária")
 
-# Conexão com o Supabase
+# Conexão
 conn = st.connection("supabase", type=SupabaseConnection)
 
-# Aba de Visualização
 tab1, tab2 = st.tabs(["📊 Visão Geral", "📝 Novo Lançamento"])
 
 with tab1:
     st.subheader("Posição Consolidada")
-    # Busca os dados do banco
-    df = conn.query("*", table="carteira_diaria").execute()
-    if df.data:
-        st.dataframe(df.data) # Mostra a tabela bonitona
-    else:
-        st.info("Nenhum dado encontrado. Vá na aba de lançamentos!")
+    # Jeito direto de buscar os dados
+    try:
+        response = conn.table("carteira_diaria").select("*").execute()
+        if response.data:
+            st.dataframe(response.data, use_container_width=True)
+        else:
+            st.info("O banco está vazio. Registre algo na outra aba!")
+    except Exception as e:
+        st.error(f"Erro ao buscar dados: {e}")
 
 with tab2:
     st.subheader("Registrar Movimentação")
@@ -30,5 +30,8 @@ with tab2:
         submit = st.form_submit_button("Salvar na Carteira")
         
         if submit:
-            conn.table("carteira_diaria").insert({"ativo": ativo, "valor_mercado": valor, "tipo_ativo": tipo}).execute()
-            st.success("Dado gravado com sucesso!")
+            try:
+                conn.table("carteira_diaria").insert({"ativo": ativo, "valor_mercado": valor, "tipo_ativo": tipo}).execute()
+                st.success("Dado gravado com sucesso! Atualize a página para ver na lista.")
+            except Exception as e:
+                st.error(f"Erro ao salvar: {e}")
