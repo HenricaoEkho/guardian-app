@@ -1,4 +1,42 @@
 import streamlit as st
+import pandas as pd
+from st_supabase_connection import SupabaseConnection
+
+st.set_page_config(page_title="Guardian - Importador", layout="wide")
+st.title("🛡️ Guardian: Carga de Dados")
+
+conn = st.connection("supabase", type=SupabaseConnection)
+
+# --- NOVO: IMPORTADOR DE EXCEL ---
+st.subheader("🚀 Importar Carteira via Excel")
+uploaded_file = st.file_uploader("Escolha o arquivo Excel ou CSV", type=['xlsx', 'csv'])
+
+if uploaded_file:
+    # Lendo o arquivo
+    if uploaded_file.name.endswith('.csv'):
+        df_import = pd.read_csv(uploaded_file)
+    else:
+        df_import = pd.read_excel(uploaded_file)
+    
+    st.write("Prévia dos dados encontrados:")
+    st.dataframe(df_import.head())
+
+    if st.button("Confirmar Carga no Banco"):
+        # Transforma o Excel em formato que o Supabase entende (JSON)
+        dados = df_import.to_dict(orient='records')
+        try:
+            conn.table("carteira_diaria").insert(dados).execute()
+            st.success(f"Sucesso! {len(dados)} ativos importados.")
+        except Exception as e:
+            st.error(f"Erro na carga: {e}")
+
+st.divider()
+
+# --- ABA DE VISUALIZAÇÃO ---
+st.subheader("📊 Posição Atual")
+response = conn.table("carteira_diaria").select("*").execute()
+if response.data:
+    st.dataframe(response.data)import streamlit as st
 from st_supabase_connection import SupabaseConnection
 
 st.set_page_config(page_title="Guardian - Gestão de Fundos", layout="wide")
