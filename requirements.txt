@@ -2,3 +2,4 @@ streamlit
 st-supabase-connection
 pandas
 openpyxl
+google-generativeai
