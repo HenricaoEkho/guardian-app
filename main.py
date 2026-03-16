@@ -20,23 +20,59 @@ if menu == "Importar com IA":
     st.subheader("🤖 Analista IA: Leitura de Relatórios Complexos")
     uploaded_file = st.file_uploader("Suba o PDF ou Excel do Fundo", type=['xlsx', 'pdf', 'csv'])
 
-    if uploaded_file:
-        with st.spinner("O Gemini está analisando os dados..."):
-            # Lendo o arquivo corretamente (tratando CSV ou Excel)
-            if uploaded_file.name.endswith('.csv'):
-                df_raw = pd.read_csv(uploaded_file).to_string()
-            else:
-                df_raw = pd.read_excel(uploaded_file).to_string()
-            
-            prompt = f"""
-            Abaixo estão os dados brutos de um relatório de fundo de investimento. 
-            Extraia todos os ativos da carteira, seus valores de mercado e tipos de ativos.
-            Retorne APENAS um JSON no formato:
-            [{{"ativo": "NOME", "valor_mercado": 0.0, "tipo_ativo": "TIPO"}}]
-            Dados: {df_raw}
-            """
-            
-            response = model.generate_content(prompt)
+if uploaded_file:
+        with st.spinner("Limpando e analisando dados com IA..."):
+            try:
+                # 1. Lê o arquivo
+                if uploaded_file.name.endswith('.csv'):
+                    df_raw = pd.read_csv(uploaded_file)
+                else:
+                    df_raw = pd.read_excel(uploaded_file)
+                
+                # 2. LIMPEZA: Remove linhas e colunas que estão 100% vazias
+                df_clean = df_raw.dropna(how='all').dropna(axis=1, how='all')
+                
+                # 3. Pega apenas as primeiras 100 linhas (geralmente onde está a carteira)
+                # Isso evita mandar lixo e estourar o limite da API
+                texto_para_ia = df_clean.head(100).to_string()
+                
+                prompt = f"""
+                Você é um especialista em fundos de investimento. 
+                Analise os dados abaixo e extraia a CARTEIRA DE ATIVOS.
+                Ignore cabeçalhos e rodapés. Foque em: Nome do Ativo, Valor de Mercado e Tipo.
+                
+                Retorne APENAS um JSON no formato:
+                [
+                  {{"ativo": "NOME DO ATIVO", "valor_mercado": 1234.56, "tipo_ativo": "TIPO"}}
+                ]
+                
+                DADOS:
+                {texto_para_ia}
+                """
+                
+                # 4. Chama a IA
+                response = model.generate_content(prompt)
+                
+                # 5. Processa a resposta
+                response_text = response.text.strip()
+                start_index = response_text.find('[')
+                end_index = response_text.rfind(']') + 1
+                
+                if start_index == -1:
+                    st.error("A IA não conseguiu encontrar dados de ativos. Tente subir um trecho mais limpo.")
+                    st.info(f"Resposta da IA: {response_text}")
+                else:
+                    dados_json = json.loads(response_text[start_index:end_index])
+                    st.write("✅ Ativos identificados pela IA:")
+                    st.table(dados_json)
+
+                    if st.button("Confirmar e Salvar no Supabase"):
+                        conn = st.connection("supabase", type=SupabaseConnection)
+                        conn.table("carteira_diaria").insert(dados_json).execute()
+                        st.success("Dados integrados ao Guardian!")
+
+            except Exception as e:
+                st.error(f"Erro no processamento: {e}")
             
             # --- NOVA LÓGICA DE LIMPEZA DE JSON ---
             try:
