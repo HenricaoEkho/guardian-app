@@ -10,7 +10,7 @@ st.title("🛡️ Guardian: Inteligência de Dados com IA")
 
 # Conexões
 conn = st.connection("supabase", type=SupabaseConnection)
-genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+genai.configure(api_key=st.secrets.get("GEMINI_API_KEY", "CHAVE_NAO_ENCONTRADA"))
 model = genai.GenerativeModel('gemini-1.5-flash')
 
 menu = st.sidebar.radio("Navegação", ["Dashboard", "Importar com IA"])
