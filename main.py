@@ -11,7 +11,7 @@ st.title("🛡️ Guardian: Inteligência de Dados com IA")
 # 2. Verificação de Segurança da API Key
 gemini_key = st.secrets.get("GEMINI_API_KEY")
 
-if not gemini_key or gemini_key == "SUA_CHAVE_AQUI":
+if not gemini_key or gemini_key == "AIzaSyDoWH6p4-asXzlI4hyzCQ0X_6eaqTQCHhE":
     st.error("⚠️ Erro: API Key do Gemini não encontrada nos Secrets do Streamlit.")
     st.info("Va em Settings > Secrets e adicione: GEMINI_API_KEY = 'sua_chave_aqui'")
     st.stop()
