@@ -1,67 +1,53 @@
 import streamlit as st
 import pandas as pd
 from st_supabase_connection import SupabaseConnection
+import google.generativeai as genai
+import json
 
-# Configuração
-st.set_page_config(page_title="Guardian - Gestão", layout="wide")
-st.title("🛡️ Guardian: Inteligência de Dados")
+# Configuração Inicial
+st.set_page_config(page_title="Guardian AI", layout="wide")
+st.title("🛡️ Guardian: Inteligência de Dados com IA")
 
-# Conexão
+# Conexões
 conn = st.connection("supabase", type=SupabaseConnection)
+genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+model = genai.GenerativeModel('gemini-1.5-flash')
 
-# Menu Lateral para navegação
-menu = st.sidebar.radio("Navegação", ["Dashboard", "Importar Excel"])
+menu = st.sidebar.radio("Navegação", ["Dashboard", "Importar com IA"])
 
-if menu == "Importar Excel":
-    st.subheader("🚀 Carga de Dados via Planilha")
-    uploaded_file = st.file_uploader("Arraste seu Excel ou CSV aqui", type=['xlsx', 'csv'])
+if menu == "Importar com IA":
+    st.subheader("🤖 Analista IA: Leitura de Relatórios Complexos")
+    uploaded_file = st.file_uploader("Suba o PDF ou Excel do Fundo", type=['xlsx', 'pdf', 'csv'])
 
-if uploaded_file:
-        try:
-            # Opção para pular linhas de cabeçalho (comum em relatórios de fundos)
-            skip_rows = st.number_input("Pular quantas linhas de cabeçalho?", min_value=0, value=0)
+    if uploaded_file:
+        with st.spinner("O Gemini está analisando os dados..."):
+            # Converte o arquivo para uma string (texto) para a IA ler
+            df_raw = pd.read_excel(uploaded_file).to_string()
             
-            # Lendo o arquivo pulando as linhas escolhidas
-            if uploaded_file.name.endswith('.csv'):
-                df_import = pd.read_csv(uploaded_file, skiprows=skip_rows)
-            else:
-                df_import = pd.read_excel(uploaded_file, skiprows=skip_rows)
+            prompt = f"""
+            Abaixo estão os dados brutos de um relatório de fundo de investimento. 
+            Extraia todos os ativos da carteira, seus valores de mercado e tipos de ativos.
+            Retorne APENAS um JSON no formato:
+            [{"ativo": "NOME", "valor_mercado": 0.0, "tipo_ativo": "TIPO"}]
+            Dados: {df_raw}
+            """
             
-            st.write("Prévia dos dados:")
-            st.dataframe(df_import.head(10)) # Mostra 10 linhas para conferir
+            response = model.generate_content(prompt)
+            # Limpa a resposta para pegar apenas o JSON
+            clean_json = response.text.replace('```json', '').replace('```', '').strip()
+            dados_estruturados = json.loads(clean_json)
+            
+            st.write("✅ IA Identificou os seguintes dados:")
+            st.table(dados_estruturados)
 
-            # Seleção de Colunas (O Tradutor)
-            st.subheader("🔗 Mapeamento de Colunas")
-            col_ativo = st.selectbox("Qual coluna é o NOME DO ATIVO?", df_import.columns)
-            col_valor = st.selectbox("Qual coluna é o VALOR DE MERCADO?", df_import.columns)
-            col_tipo = st.selectbox("Qual coluna é o TIPO DE ATIVO?", df_import.columns)
-
-            if st.button("Confirmar Envio para o Supabase"):
-                # Filtra apenas o que queremos e renomeia para o padrão do banco
-                df_final = df_import[[col_ativo, col_valor, col_tipo]].copy()
-                df_final.columns = ['ativo', 'valor_mercado', 'tipo_ativo']
-                
-                # Remove linhas vazias
-                df_final = df_final.dropna(subset=['ativo'])
-                
-                dados = df_final.to_dict(orient='records')
-                conn.table("carteira_diaria").insert(dados).execute()
-                st.success(f"Show! {len(dados)} ativos importados com sucesso!")
-        except Exception as e:
-            st.error(f"Erro no processamento: {e}")
+            if st.button("Confirmar e Salvar no Supabase"):
+                conn.table("carteira_diaria").insert(dados_estruturados).execute()
+                st.success("Dados salvos com sucesso!")
 
 else:
-    st.subheader("📊 Posição da Carteira")
-    try:
-        response = conn.table("carteira_diaria").select("*").execute()
-        if response.data:
-            df = pd.DataFrame(response.data)
-            st.dataframe(df, use_container_width=True)
-            
-            # Gráfico Simples
-            if 'valor_mercado' in df.columns and 'ativo' in df.columns:
-                st.bar_chart(data=df, x='ativo', y='valor_mercado')
-        else:
-            st.info("Banco de dados vazio.")
-    except Exception as e:
-        st.error(f"Erro ao carregar dashboard: {e}")
+    st.subheader("📊 Posição Consolidada")
+    res = conn.table("carteira_diaria").select("*").execute()
+    if res.data:
+        st.dataframe(pd.DataFrame(res.data))
+    else:
+        st.info("Nenhum dado no banco.")
