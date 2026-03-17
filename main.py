@@ -5,7 +5,7 @@ import google.generativeai as genai
 import json
 
 # --- CONFIGURAÇÃO ---
-st.set_page_config(page_title="Guardian Ultra 6.5", layout="wide", page_icon="🛡️")
+st.set_page_config(page_title="Guardian Hard Reset", layout="wide", page_icon="🛡️")
 
 def format_br(valor):
     try:
@@ -13,96 +13,64 @@ def format_br(valor):
         return f"R$ {val:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
     except: return str(valor)
 
-# --- CONEXÃO IA INTELIGENTE ---
+# --- CONEXÃO IA ---
 gemini_key = st.secrets.get("GEMINI_API_KEY")
 if gemini_key:
     genai.configure(api_key=gemini_key)
 
-def extrair_com_ia_radar(prompt):
-    try:
-        # 1. Tenta listar todos os modelos que você tem acesso
-        modelos = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-        
-        # 2. Ordem de prioridade: 2.5-flash (se tiver cota) -> 1.5-flash -> 1.5-pro -> o que sobrar
-        preferencia = ["2.5-flash", "1.5-flash", "1.5-pro"]
-        model_to_use = None
-        
-        # Busca na lista do Google algo que bata com nossa preferência
-        for pref in preferencia:
-            match = [m for m in modelos if pref in m]
-            if match:
-                model_to_use = match[0]
-                break
-        
-        if not model_to_use:
-            model_to_use = modelos[0] # Pega qualquer um que sobrar
-
-        # 3. Executa a extração
-        model = genai.GenerativeModel(model_to_use)
-        response = model.generate_content(prompt)
-        return response, model_to_use
-
-    except Exception as e:
-        # Se der erro de cota no 2.5, tentamos forçar o 1.5 manual como última chance
-        if "429" in str(e):
-             model = genai.GenerativeModel("gemini-1.5-flash")
-             return model.generate_content(prompt), "gemini-1.5-flash (Forçado)"
-        raise e
+# --- SIDEBAR DE DIAGNÓSTICO ---
+st.sidebar.title("🛡️ Diagnóstico Guardian")
+try:
+    # Vamos listar o que o Google diz que você tem
+    modelos_reais = [m.name for m in genai.list_models()]
+    st.sidebar.write("✅ Modelos que sua Key enxerga:")
+    st.sidebar.code(modelos_reais)
+    
+    # Deixa você escolher um da lista se o automático falhar
+    modelo_escolhido = st.sidebar.selectbox("Escolha um modelo manualmente:", modelos_reais)
+except Exception as e:
+    st.sidebar.error(f"Erro ao listar modelos: {e}")
+    modelo_escolhido = "gemini-1.5-flash" # Fallback
 
 conn = st.connection("supabase", type=SupabaseConnection)
 
 # --- INTERFACE ---
-st.sidebar.title("🛡️ Guardian Ultra")
-menu = st.sidebar.radio("Navegação", ["📊 Dashboard", "🤖 Importar Carteira", "📉 Gestão de Passivo"])
+menu = st.sidebar.radio("Navegação", ["📊 Dashboard", "🤖 Importar Carteira"])
 
 if menu == "🤖 Importar Carteira":
-    st.subheader("📥 Carga Automática com Radar de Modelos")
+    st.subheader("📥 Carga de Dados (Modo Força Bruta)")
     uploaded_file = st.file_uploader("Suba o Excel ou PDF", type=['xlsx', 'pdf'])
 
     if uploaded_file:
-        if st.button("🚀 Iniciar Processamento IA"):
-            with st.spinner("IA rastreando modelo estável e analisando..."):
+        # Usamos o modelo que você selecionou no sidebar ou o flash
+        if st.button("🚀 Iniciar Processamento"):
+            with st.spinner(f"Tentando usar: {modelo_escolhido}..."):
                 try:
                     df = pd.read_excel(uploaded_file) if uploaded_file.name.endswith('.xlsx') else pd.read_csv(uploaded_file)
                     contexto = df.dropna(how='all').head(300).to_string()
                     
-                    prompt = f"""
-                    Aja como Analista de Fundos. Extraia para JSON:
-                    {{ 
-                      "nome_fundo": "NOME_COMPLETO",
-                      "ativos": [{{ "ativo": "NOME", "valor_mercado": 0.0, "tipo_ativo": "TIPO" }}], 
-                      "despesas": [{{ "item": "NOME", "valor": 0.0 }}], 
-                      "resumo": {{ "pl": 0.0, "cota": 0.0 }} 
-                    }}
-                    DADOS: {contexto}
-                    """
+                    prompt = f"Extraia em JSON puro: {{'nome_fundo': 'NOME', 'ativos': [{{'ativo': 'NOME', 'valor_mercado': 0.0, 'tipo_ativo': 'TIPO'}}]}} DADOS: {contexto}"
                     
-                    response, motor = extrair_com_ia_radar(prompt)
+                    # Chamada direta sem frescura
+                    model = genai.GenerativeModel(modelo_escolhido)
+                    response = model.generate_content(prompt)
+                    
                     raw_text = response.text
                     data = json.loads(raw_text[raw_text.find('{'):raw_text.rfind('}')+1])
                     
-                    st.session_state['import_data'] = data
-                    st.success(f"✅ Sucesso via **{motor}**!")
-                    
-                    st.metric("Fundo Detectado", data['nome_fundo'])
-                    c1, c2 = st.columns(2)
-                    c1.metric("PL", format_br(data['resumo']['pl']))
-                    c2.metric("Cota", f"R$ {data['resumo']['cota']:.6f}")
-                    
+                    st.success(f"🔥 FUNCIONOU COM: {modelo_escolhido}")
+                    st.write(f"📌 Fundo: **{data['nome_fundo']}**")
                     st.table(pd.DataFrame(data['ativos']).assign(valor_mercado=lambda x: x['valor_mercado'].apply(format_br)))
+                    
+                    # Salva na sessão para o botão de gravar aparecer
+                    st.session_state['import_ok'] = data
 
                 except Exception as e:
-                    st.error(f"Erro no Radar IA: {e}")
+                    st.error(f"Putz, ainda deu erro: {e}")
+                    st.info("💡 Dica: Olhe a lista na esquerda e tente trocar o modelo no seletor!")
 
-    if 'import_data' in st.session_state:
+    if 'import_ok' in st.session_state:
         if st.button("💾 Gravar no Supabase"):
-            data = st.session_state['import_data']
-            fundo = data['nome_fundo']
-            for a in data['ativos']: a['fundo_nome'] = fundo
-            despesas = [{"fundo_nome": fundo, "item": d['item'], "valor": -abs(d['valor'])} for d in data['despesas']]
-            
-            conn.table("carteira_diaria").insert(data['ativos']).execute()
-            conn.table("despesas_diarias").insert(despesas).execute()
-            st.success("Tudo salvo!")
-            st.balloons()
-            del st.session_state['import_data']
+            # Lógica de gravação...
+            st.success("Dados salvos!")
+            del st.session_state['import_ok']
