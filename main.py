@@ -8,7 +8,7 @@ from datetime import datetime
 from pypdf import PdfReader
 
 # --- 1. CONFIGURAÇÃO ---
-st.set_page_config(page_title="Guardian Ultra - Stable", layout="wide", page_icon="🛡️")
+st.set_page_config(page_title="Guardian Ultra v22", layout="wide", page_icon="🛡️")
 
 def format_br(valor, prefixo="R$ "):
     try:
@@ -17,7 +17,6 @@ def format_br(valor, prefixo="R$ "):
     except: return str(valor)
 
 def extrair_data_arquivo(nome_arquivo):
-    # Procura formato DD_MM_YYYY ou DD-MM-YYYY no nome do arquivo
     match = re.search(r'(\d{2})[_\-](\d{2})[_\-](\d{4})', nome_arquivo)
     if match:
         dia, mes, ano = match.groups()
@@ -37,12 +36,12 @@ def chamar_ia_hydra(prompt):
             model = genai.GenerativeModel(m)
             return model.generate_content(prompt), m
         except: continue
-    raise Exception("Modelos fora do ar.")
+    raise Exception("Modelos IA fora do ar.")
 
 conn = st.connection("supabase", type=SupabaseConnection)
 
-# --- 3. SIDEBAR E NAVEGAÇÃO ---
-st.sidebar.title("🛡️ Guardian Ultra")
+# --- 3. SIDEBAR ---
+st.sidebar.title("🛡️ Guardian Ultra v22")
 try:
     res_f = conn.table("regulamentos").select("fundo_nome").execute()
     lista_regulamentos = sorted(list(set([i['fundo_nome'] for i in res_f.data]))) if res_f.data else []
@@ -51,41 +50,54 @@ except: lista_regulamentos = []
 fundo_ativo = st.sidebar.selectbox("Fundo Ativo:", lista_regulamentos if lista_regulamentos else ["Nenhum"])
 menu = st.sidebar.radio("Ir para:", ["📊 Dashboard", "🤖 Importar Carteira", "📜 Regulamento"])
 
-# --- 4. 📊 DASHBOARD ---
+# --- 4. 📊 DASHBOARD (COMPLIANCE IMPLACÁVEL) ---
 if menu == "📊 Dashboard":
     st.subheader(f"📊 Compliance: {fundo_ativo}")
     if fundo_ativo != "Nenhum":
-        # Puxa as datas disponíveis para esse fundo específico
         res_datas = conn.table("carteira_diaria").select("data").eq("fundo_nome", fundo_ativo).execute()
         if res_datas.data:
             datas_disp = sorted(list(set([d['data'] for d in res_datas.data])), reverse=True)
-            data_selecionada = st.selectbox("📅 Selecione a Data da Posição:", datas_disp)
+            data_selecionada = st.selectbox("📅 Data da Posição:", datas_disp)
             
-            # Puxa carteira e regulamento com base no Fundo E Data
             c = conn.table("carteira_diaria").select("*").eq("fundo_nome", fundo_ativo).eq("data", data_selecionada).execute()
+            d = conn.table("despesas_diarias").select("*").eq("fundo_nome", fundo_ativo).eq("data", data_selecionada).execute()
             r = conn.table("regulamentos").select("*").eq("fundo_nome", fundo_ativo).execute()
             
             if c.data and r.data:
                 reg = r.data[0]
                 df_c = pd.DataFrame(c.data)
-                pl_total = df_c['valor_mercado'].sum()
+                df_d = pd.DataFrame(d.data) if d.data else pd.DataFrame(columns=['item', 'valor'])
                 
-                # --- O Vínculo de Inteligência (Mapa de Ativos) ---
-                mapa = reg.get('mapa_ativos_json', {})
-                def classificar_ativo(nome):
-                    nome_up = str(nome).upper()
-                    for chave, tag in mapa.items():
-                        if str(chave).upper() in nome_up: return tag
-                    return "Outros"
+                # PL REAL (Ativos + Despesas que já estão negativas)
+                total_ativos = df_c['valor_mercado'].sum()
+                total_despesas = df_d['valor'].sum() if not df_d.empty else 0
+                pl_liquido = total_ativos + total_despesas
                 
-                df_c['categoria_compliance'] = df_c['ativo'].apply(classificar_ativo)
+                col1, col2, col3 = st.columns(3)
+                col1.metric("Total Ativos", format_br(total_ativos))
+                col2.metric("Total Despesas", format_br(total_despesas))
+                col3.metric(f"PL Líquido ({data_selecionada})", format_br(pl_liquido))
                 
-                st.metric(f"Patrimônio Líquido ({data_selecionada})", format_br(pl_total))
-                st.write("### ✅ Enquadramento (Gavetas Matemáticas)")
+                # --- A PONTE DE COMPLIANCE ---
+                mapa_ativos = reg.get('mapa_ativos_json', {}) or {}
                 
+                def definir_gaveta_compliance(linha):
+                    # 1. Verifica se o ativo está mapeado especificamente pelo nome no regulamento
+                    nome_up = str(linha['ativo']).upper()
+                    for chave_mapa, categoria_regra in mapa_ativos.items():
+                        if str(chave_mapa).upper() in nome_up:
+                            return categoria_regra
+                    # 2. Se não estiver mapeado, usa a natureza real que a IA identificou na importação
+                    return linha['tipo_ativo']
+
+                df_c['gaveta_matematica'] = df_c.apply(definir_gaveta_compliance, axis=1)
+
+                st.write("### ✅ Enquadramento do Regulamento")
                 for regra in reg.get('regras_json', []):
-                    ativos_regra = df_c[df_c['categoria_compliance'].isin(regra['categorias'])]
-                    perc = ativos_regra['valor_mercado'].sum() / pl_total if pl_total > 0 else 0
+                    # Filtra a carteira baseando-se na gaveta que bate com a regra
+                    ativos_regra = df_c[df_c['gaveta_matematica'].isin(regra['categorias'])]
+                    v_soma = ativos_regra['valor_mercado'].sum()
+                    perc = v_soma / pl_liquido if pl_liquido > 0 else 0
                     
                     if regra['tipo'] == 'minimo_percentual':
                         valido = perc >= regra.get('limite_min', 0)
@@ -97,16 +109,25 @@ if menu == "📊 Dashboard":
                     cor = "green" if valido else "red"
                     st.markdown(f"**{regra.get('id', 'Regra')}**: :{cor}[{perc*100:.2f}%] ({alvo})")
 
-                st.write("### 📄 Posição da Carteira")
-                st.dataframe(df_c[['ativo', 'valor_mercado', 'tipo_ativo', 'categoria_compliance']].assign(valor_mercado=lambda x: x['valor_mercado'].apply(format_br)))
+                col_t1, col_t2 = st.columns(2)
+                with col_t1:
+                    st.write("### 📄 Carteira: Natureza Real vs Compliance")
+                    # Mostra a verdade (tipo_ativo) e como o sistema enquadrou (gaveta_matematica)
+                    df_view = df_c[['ativo', 'valor_mercado', 'tipo_ativo', 'gaveta_matematica']].copy()
+                    df_view['valor_mercado'] = df_view['valor_mercado'].apply(format_br)
+                    st.dataframe(df_view, use_container_width=True)
+                with col_t2:
+                    st.write("### 💸 Despesas")
+                    if not df_d.empty:
+                        st.dataframe(df_d[['item', 'valor']].assign(valor=lambda x: x['valor'].apply(format_br)), use_container_width=True)
+                    else:
+                        st.info("Nenhuma despesa registrada.")
         else:
-            st.warning("Nenhuma carteira importada para este fundo.")
-    else:
-        st.info("Cadastre um regulamento primeiro.")
+            st.warning("Importe a carteira para este fundo na data selecionada.")
 
-# --- 5. 🤖 IMPORTAR CARTEIRA (COM VÍNCULO E DESPESAS REAIS) ---
+# --- 5. 🤖 IMPORTAR CARTEIRA (A VERDADE NUA E CRUA) ---
 elif menu == "🤖 Importar Carteira":
-    st.subheader("📥 Carga de Dados")
+    st.subheader("📥 Carga de Dados e Identificação de Mercado")
     
     if not lista_regulamentos:
         st.error("⚠️ Cadastre um Regulamento primeiro para poder vincular a carteira.")
@@ -114,43 +135,49 @@ elif menu == "🤖 Importar Carteira":
         fundo_vinculo = st.selectbox("🔗 A qual fundo esta carteira pertence?", lista_regulamentos)
         upload_c = st.file_uploader("Excel da Carteira", type=['xlsx'])
         
-        if upload_c and st.button("🚀 Processar"):
+        if upload_c and st.button("🚀 Extrair a Verdade da Carteira"):
             data_arq = extrair_data_arquivo(upload_c.name)
-            st.info(f"📅 Data identificada no arquivo: {data_arq}")
+            st.info(f"📅 Data identificada: {data_arq}")
             
-            with st.spinner("IA classificando ativos e despesas..."):
+            with st.spinner("Analisando a natureza real de cada ativo..."):
                 df = pd.read_excel(upload_c)
                 contexto = df.dropna(how='all').head(300).to_string()
                 
+                # PROMPT INDEPENDENTE: Não olha pro regulamento, olha pro mercado.
                 prompt_c = f"""
-                Analista de Backoffice: Extraia PL, Cota, Ativos e Despesas.
-                ATENÇÃO PARA TIPO_ATIVO: Não use 'Cota'. Identifique a natureza: 'Debênture', 'LFT / Tesouro', 'FIDC', 'Ações', 'Disponibilidade'.
+                Você é um Analista de Mercado Financeiro Independente.
+                Sua tarefa é ler a carteira e identificar a NATUREZA REAL de cada ativo no mercado brasileiro.
+                Exemplos de natureza: 'Fundo de Renda Fixa', 'Debênture Incentivada', 'Debênture Comum', 'LFT', 'CDB', 'FIDC', 'Ação'.
+                NÃO use termos genéricos como 'Cota' ou 'Portfólio Inv'. Diga o que o ativo realmente é. Extraia também as despesas (Auditoria, Custódia, etc).
                 
                 JSON: {{
                   'resumo': {{'pl': 0.0, 'cota': 0.0}}, 
-                  'ativos': [{{'ativo': 'NOME', 'valor_mercado': 0.0, 'tipo_ativo': 'CLASSIFICAÇÃO REAL'}}], 
-                  'despesas': [{{'item': 'NOME_DESPESA', 'valor': 0.0}}]
+                  'ativos': [{{'ativo': 'NOME', 'valor_mercado': 0.0, 'tipo_ativo': 'NATUREZA_REAL'}}], 
+                  'despesas': [{{'item': 'NOME', 'valor': 0.0}}]
                 }}
-                DADOS: {contexto}
+                DADOS DO EXCEL: {contexto}
                 """
                 res, motor = chamar_ia_hydra(prompt_c)
                 data = json.loads(res.text[res.text.find('{'):res.text.rfind('}')+1])
                 
+                # Garante que despesas fiquem negativas
                 for d in data.get('despesas', []): d['valor'] = -abs(float(d['valor']))
                 
                 st.session_state['temp_c'] = {'data': data, 'data_arq': data_arq, 'fundo': fundo_vinculo}
                 
-                c1, c2 = st.columns(2)
-                c1.metric("PL Identificado", format_br(data['resumo']['pl']))
-                c2.metric("Cota", f"R$ {data['resumo']['cota']:.6f}")
+                st.write(f"### Validação Extraída ({motor})")
+                col_a, col_b = st.columns(2)
+                col_a.metric("PL Lido", format_br(data['resumo']['pl']))
+                col_b.metric("Cota", f"R$ {data['resumo']['cota']:.6f}")
                 
-                st.write("### Ativos")
-                st.dataframe(pd.DataFrame(data['ativos']))
+                st.write("**Ativos (Natureza Real)**")
+                st.dataframe(pd.DataFrame(data['ativos']).assign(valor_mercado=lambda x: x['valor_mercado'].apply(format_br)))
+                
                 if data.get('despesas'):
-                    st.write("### Despesas")
+                    st.write("**Despesas Encontradas**")
                     st.dataframe(pd.DataFrame(data['despesas']))
 
-        if 'temp_c' in st.session_state and st.button("💾 Gravar Carteira"):
+        if 'temp_c' in st.session_state and st.button("💾 Gravar no Banco de Dados"):
             tc = st.session_state['temp_c']
             fn, dt, d = tc['fundo'], tc['data_arq'], tc['data']
             
@@ -164,35 +191,36 @@ elif menu == "🤖 Importar Carteira":
             if d.get('ativos'): conn.table("carteira_diaria").insert(d['ativos']).execute()
             if d.get('despesas'): conn.table("despesas_diarias").insert(d['despesas']).execute()
             
-            st.success(f"Posição do dia {dt} para {fn} gravada com sucesso!")
+            st.success(f"Dados salvos! Vá para o Dashboard ver o cruzamento de regras.")
             del st.session_state['temp_c']
 
-# --- 6. 📜 REGULAMENTO (À PROVA DE ERROS) ---
+# --- 6. 📜 REGULAMENTO (O ARQUITETO) ---
 elif menu == "📜 Regulamento":
     st.subheader("📜 Arquiteto de Compliance")
     upload_reg = st.file_uploader("Suba o PDF", type=['pdf'])
     
-    if upload_reg and st.button("🚀 Mapear Fundo"):
-        with st.spinner("Analisando Anexo e Política de Investimento..."):
+    if upload_reg and st.button("🚀 Mapear Estrutura"):
+        with st.spinner("Fatiando texto em regras matemáticas..."):
             try:
                 reader = PdfReader(upload_reg)
                 texto = "".join([p.extract_text() for p in reader.pages[:40]])
                 
                 super_prompt = f"""
-                Analista de Risco: Transforme o regulamento em JSON rigoroso.
-                TIPO: 'minimo_percentual' ou 'maximo_percentual'. LIMITES: Use 0.0 a 1.0 (ex: 95% = 0.95).
-                JSON: {{ "fundo": "NOME_DO_FUNDO", "cnpj": "CNPJ", "mandato": "Mandato", "regras": [{{ "id": "ID", "tipo": "minimo_percentual", "limite_min": 0.0, "categorias": ["CAT"] }}], "mapa_ativos": {{ "TERMO": "CAT" }}, "categorias_definidas": {{ "CAT": "DESC" }} }}
+                Analista CVM: Transforme o regulamento em JSON rigoroso.
+                TIPO: 'minimo_percentual' ou 'maximo_percentual'. LIMITES: Use 0.0 a 1.0.
+                MAPA DE ATIVOS: Dicionário para atrelar CNPJs ou Nomes de Ativos Específicos (ex: 'SPARTA') às categorias das regras.
+                
+                JSON: {{ "fundo": "NOME", "cnpj": "CNPJ", "mandato": "Mandato", "regras": [{{ "id": "ID", "tipo": "minimo_percentual", "limite_min": 0.0, "categorias": ["CAT"] }}], "mapa_ativos": {{ "TERMO_ESPECIFICO": "CAT" }}, "categorias_definidas": {{ "CAT": "DESC" }} }}
                 TEXTO: {texto[:25000]}
                 """
                 res, motor = chamar_ia_hydra(super_prompt)
                 data = json.loads(res.text[res.text.find('{'):res.text.rfind('}')+1])
                 st.session_state['schema_reg'] = data
                 st.json(data)
-            except Exception as e: st.error(f"Erro na extração: {e}")
+            except Exception as e: st.error(f"Erro: {e}")
 
-    if 'schema_reg' in st.session_state and st.button("💾 Salvar Regulamento"):
+    if 'schema_reg' in st.session_state and st.button("💾 Salvar Cérebro"):
         d = st.session_state['schema_reg']
-        # Uso do .get() garante que se a IA omitir algo, o código não quebra
         payload = {
             "fundo_nome": d.get('fundo', 'FUNDO_SEM_NOME'),
             "cnpj": d.get('cnpj', ''),
@@ -203,8 +231,8 @@ elif menu == "📜 Regulamento":
         }
         try:
             conn.table("regulamentos").upsert(payload, on_conflict="fundo_nome").execute()
-            st.success("Regulamento estruturado e salvo!")
+            st.success("Regulamento ativado!")
             del st.session_state['schema_reg']
             st.rerun()
         except Exception as e:
-            st.error(f"Erro de banco de dados: {e}")
+            st.error(f"Erro SQL: {e}")
