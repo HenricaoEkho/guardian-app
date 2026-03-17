@@ -17,7 +17,7 @@ if not gemini_key:
 
 # 3. Configura o motor da IA
 genai.configure(api_key=gemini_key)
-model = genai.GenerativeModel('gemini-1.5-flash')
+model = genai.GenerativeModel('gemini-pro')
 
 # 4. Navegação lateral
 menu = st.sidebar.radio("Navegação", ["📊 Dashboard", "🤖 Importar com IA"])
