@@ -5,7 +5,7 @@ import google.generativeai as genai
 import json
 
 # --- CONFIGURAÇÃO ---
-st.set_page_config(page_title="Guardian Ultra 6.3", layout="wide", page_icon="🛡️")
+st.set_page_config(page_title="Guardian Pro Ultra 6.4", layout="wide", page_icon="🛡️")
 
 def format_br(valor):
     try:
@@ -13,33 +13,24 @@ def format_br(valor):
         return f"R$ {val:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
     except: return str(valor)
 
-# --- CONEXÃO IA DINÂMICA ---
+# --- CONEXÃO IA ---
 gemini_key = st.secrets.get("GEMINI_API_KEY")
 if gemini_key:
     genai.configure(api_key=gemini_key)
 
-# Função "Detetive": Encontra o melhor modelo disponível na hora
-def extrair_com_ia_dinamica(prompt):
+# Função "Tanque": Tenta o melhor, se der qualquer erro, pula pro 1.5 estável
+def extrair_com_ia_blindada(prompt):
+    # Tentativa 1: O 2.5 (Elite - 20/dia)
     try:
-        # 1. Tenta o 2.5 primeiro (nosso favorito)
-        m25 = genai.GenerativeModel('models/gemini-2.5-flash')
-        return m25.generate_content(prompt), "Gemini 2.5 Flash (Elite)"
-    except Exception as e:
-        if "429" in str(e) or "404" in str(e):
-            # 2. Se falhar, busca na lista oficial do Google o que está ativo
-            modelos_disponiveis = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-            
-            # Filtra para achar qualquer versão do 1.5 Flash (que tem cota alta)
-            reserva = [m for m in modelos_disponiveis if "1.5-flash" in m]
-            
-            if reserva:
-                modelo_final = genai.GenerativeModel(reserva[0])
-                return modelo_final.generate_content(prompt), f"Reserva Ativada: {reserva[0]}"
-            else:
-                # Se não achar o 1.5, pega o primeiro que aparecer (pro, etc)
-                modelo_final = genai.GenerativeModel(modelos_disponiveis[0])
-                return modelo_final.generate_content(prompt), f"Modo Sobrevivência: {modelos_disponiveis[0]}"
-        raise e
+        model_elite = genai.GenerativeModel('gemini-2.5-flash')
+        return model_elite.generate_content(prompt), "Gemini 2.5 Flash (Elite)"
+    except Exception:
+        # Tentativa 2: O 1.5 (Reserva - 1500/dia) - Usando nome completo estável
+        try:
+            model_reserva = genai.GenerativeModel('gemini-1.5-flash')
+            return model_reserva.generate_content(prompt), "Gemini 1.5 Flash (Tanque de Guerra)"
+        except Exception as e2:
+            raise Exception(f"Ambos os modelos falharam. Erro final: {e2}")
 
 conn = st.connection("supabase", type=SupabaseConnection)
 
@@ -49,20 +40,28 @@ menu = st.sidebar.radio("Navegação", ["📊 Dashboard", "🤖 Importar Carteir
 
 # --- 1. IMPORTAÇÃO ---
 if menu == "🤖 Importar Carteira":
-    st.subheader("📥 Carga Automática com Busca de Modelo")
+    st.subheader("📥 Carga Automática Blindada")
+    st.info("O sistema tentará o 2.5, mas se ele estiver cansado (quota), o 1.5 assume na hora.")
+    
     uploaded_file = st.file_uploader("Suba o Excel ou PDF", type=['xlsx', 'pdf'])
 
     if uploaded_file:
         if st.button("🚀 Iniciar Processamento IA"):
-            with st.spinner("Buscando modelo ativo e analisando..."):
+            with st.spinner("IA analisando dados..."):
                 try:
                     df = pd.read_excel(uploaded_file) if uploaded_file.name.endswith('.xlsx') else pd.read_csv(uploaded_file)
                     contexto = df.dropna(how='all').head(250).to_string()
                     
                     prompt = f"""
-                    Extraia em JSON puro:
+                    Aja como um analista de fundos. Extraia estes dados do relatório:
+                    - NOME_FUNDO: Nome completo.
+                    - ATIVOS: Lista com 'ativo', 'valor_mercado' e 'tipo_ativo' (Diferencie Debênture Incentivada).
+                    - DESPESAS: Lista com 'item' e 'valor'.
+                    - RESUMO: 'pl' e 'cota'.
+                    
+                    Retorne APENAS um JSON puro:
                     {{ 
-                      "nome_fundo": "NOME_DO_FUNDO",
+                      "nome_fundo": "NOME",
                       "ativos": [{{ "ativo": "NOME", "valor_mercado": 0.0, "tipo_ativo": "TIPO" }}], 
                       "despesas": [{{ "item": "NOME", "valor": 0.0 }}], 
                       "resumo": {{ "pl": 0.0, "cota": 0.0 }} 
@@ -70,34 +69,41 @@ if menu == "🤖 Importar Carteira":
                     DADOS: {contexto}
                     """
                     
-                    response, motor = extrair_com_ia_dinamica(prompt)
-                    data = json.loads(response.text[response.text.find('{'):response.text.rfind('}')+1])
+                    response, motor = extrair_com_ia_blindada(prompt)
+                    raw_text = response.text
+                    
+                    # Limpeza de texto para evitar que a IA mande ```json ... ```
+                    data = json.loads(raw_text[raw_text.find('{'):raw_text.rfind('}')+1])
                     
                     st.session_state['import_data'] = data
-                    st.success(f"✅ Sucesso via **{motor}**!")
-                    st.write(f"📌 Fundo: **{data['nome_fundo']}**")
+                    st.success(f"✅ Processado via **{motor}**!")
+                    st.write(f"📌 Fundo Identificado: **{data['nome_fundo']}**")
                     
-                    # Exibição
                     c1, c2 = st.columns(2)
                     c1.metric("PL", format_br(data['resumo']['pl']))
                     c2.metric("Cota", f"R$ {data['resumo']['cota']:.6f}")
-                    st.table(pd.DataFrame(data['ativos']))
+                    
+                    with st.expander("Ver Ativos Identificados"):
+                        st.table(pd.DataFrame(data['ativos']))
 
                 except Exception as e:
-                    st.error(f"Erro Crítico: {e}")
+                    st.error(f"Erro no processamento: {e}")
 
     if 'import_data' in st.session_state:
         if st.button("💾 Gravar no Supabase"):
             data = st.session_state['import_data']
             fundo = data['nome_fundo']
+            
+            # Prepara dados
             for a in data['ativos']: a['fundo_nome'] = fundo
-            desp = [{"fundo_nome": fundo, "item": d['item'], "valor": -abs(d['valor'])} for d in data['despesas']]
+            despesas = [{"fundo_nome": fundo, "item": d['item'], "valor": -abs(d['valor'])} for d in data['despesas']]
             
             conn.table("carteira_diaria").insert(data['ativos']).execute()
-            conn.table("despesas_diarias").insert(desp).execute()
-            st.success(f"Dados salvos!")
+            conn.table("despesas_diarias").insert(despesas).execute()
+            st.success(f"Dados de {fundo} integrados!")
+            st.balloons()
             del st.session_state['import_data']
 
 # --- DASHBOARD ---
 elif menu == "📊 Dashboard":
-    st.info("O Dashboard será alimentado assim que você salvar a primeira carteira.")
+    st.info("Aqui aparecerá a análise de enquadramento.")
