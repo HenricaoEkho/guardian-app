@@ -5,8 +5,8 @@ import google.generativeai as genai
 import json
 from pypdf import PdfReader
 
-# --- 1. CONFIGURAÇÃO E ESTILO ---
-st.set_page_config(page_title="Guardian Ultra v18", layout="wide", page_icon="🛡️")
+# --- 1. CONFIGURAÇÃO ---
+st.set_page_config(page_title="Guardian Ultra v18.1", layout="wide", page_icon="🛡️")
 
 def format_br(valor, prefixo="R$ "):
     try:
@@ -32,7 +32,7 @@ def chamar_ia_hydra(prompt):
 conn = st.connection("supabase", type=SupabaseConnection)
 
 # --- 3. SIDEBAR ---
-st.sidebar.title("🛡️ Guardian Ultra v18")
+st.sidebar.title("🛡️ Guardian Ultra v18.1")
 try:
     res_f = conn.table("regulamentos").select("fundo_nome").execute()
     lista_fundos = sorted(list(set([i['fundo_nome'] for i in res_f.data]))) if res_f.data else []
@@ -51,11 +51,11 @@ if menu == "📊 Dashboard":
         if c.data:
             df_c = pd.DataFrame(c.data)
             pl_total = df_c['valor_mercado'].sum()
-            st.metric("PL Total do Fundo", format_br(pl_total))
+            st.metric("Patrimônio Líquido Total", format_br(pl_total))
             
             if r.data:
                 reg = r.data[0]
-                st.write("### ✅ Status das Gavetas Matemáticas")
+                st.write("### ✅ Status de Enquadramento")
                 for regra in reg['regras_json']:
                     v_soma = df_c[df_c['tipo_ativo'].isin(regra['categorias'])]['valor_mercado'].sum()
                     perc = v_soma / pl_total if pl_total > 0 else 0
@@ -70,11 +70,11 @@ if menu == "📊 Dashboard":
                     cor = "green" if valido else "red"
                     st.markdown(f"**{regra['id']}**: :{cor}[{perc*100:.2f}%] ({txt})")
             
-            st.write("### 📄 Detalhes da Posição")
-            st.dataframe(df_c[['ativo', 'valor_mercado', 'tipo_ativo']].assign(valor_mercado=lambda x: x['valor_mercado'].apply(format_br)))
-        else: st.warning("Sem dados de carteira.")
+            st.write("### 📄 Composição Detalhada")
+            st.dataframe(df_c[['ativo', 'valor_mercado', 'tipo_ativo']])
+        else: st.info("Aguardando carga de dados.")
 
-# --- 5. 🤖 IMPORTAR CARTEIRA (VOLTA DAS DESPESAS) ---
+# --- 5. 🤖 IMPORTAR CARTEIRA (DESPESAS RESTAURADAS) ---
 elif menu == "🤖 Importar Carteira":
     st.subheader("📥 Carga de Dados e Despesas")
     upload_c = st.file_uploader("Excel da Carteira", type=['xlsx'])
@@ -92,45 +92,48 @@ elif menu == "🤖 Importar Carteira":
             res, motor = chamar_ia_hydra(prompt_c)
             data = json.loads(res.text[res.text.find('{'):res.text.rfind('}')+1])
             
-            # Negativa as despesas automaticamente
+            # Negativa despesas e salva no estado
             for d in data['despesas']: d['valor'] = -abs(float(d['valor']))
-            
             st.session_state['temp_c'] = data
-            st.success(f"Extraído via {motor}")
             
-            c1, c2 = st.columns(2)
-            c1.metric("PL Identificado", format_br(data['resumo']['pl']))
-            c2.metric("Cota", f"R$ {data['resumo']['cota']:.6f}")
+            st.success(f"Processado via {motor}")
+            col1, col2 = st.columns(2)
+            col1.metric("PL Identificado", format_br(data['resumo']['pl']))
+            col2.metric("Cota", f"R$ {data['resumo']['cota']:.6f}")
             
-            st.write("### Prévia de Ativos")
+            st.write("### Ativos Encontrados")
             st.table(pd.DataFrame(data['ativos']).assign(valor_mercado=lambda x: x['valor_mercado'].apply(format_br)))
+            
+            if data['despesas']:
+                st.write("### Despesas Encontradas")
+                st.table(pd.DataFrame(data['despesas']))
 
-    if 'temp_c' in st.session_state and st.button("💾 Gravar Ativos e Despesas"):
+    if 'temp_c' in st.session_state and st.button("💾 Gravar Tudo no Banco"):
         d = st.session_state['temp_c']
         fundo = d['nome_fundo']
         for a in d['ativos']: a['fundo_nome'] = fundo
         for ds in d['despesas']: ds['fundo_nome'] = fundo
         
         conn.table("carteira_diaria").insert(d['ativos']).execute()
-        conn.table("despesas_diarias").insert(d['despesas']).execute()
-        st.success("Tudo salvo!")
+        if d['despesas']:
+            conn.table("despesas_diarias").insert(d['despesas']).execute()
+        
+        st.success("Carteira e Despesas salvas!")
         del st.session_state['temp_c']
 
-# --- 6. 📜 REGULAMENTO (CONSERTADO O SALVAMENTO) ---
+# --- 6. 📜 REGULAMENTO (CONSERTO DO API ERROR) ---
 elif menu == "📜 Regulamento e Compliance":
     st.subheader("📜 Arquiteto de Compliance")
     upload_reg = st.file_uploader("PDF do Regulamento", type=['pdf'])
     
     if upload_reg and st.button("🚀 Mapear Inteligência"):
-        with st.spinner("Criando dicionário e regras..."):
+        with st.spinner("Lendo Anexo I..."):
             reader = PdfReader(upload_reg)
             texto = "".join([p.extract_text() for p in reader.pages[:40]])
             
             prompt_auditoria = f"""
-            Auditor CVM 175: Fatie o regulamento em motor matemático JSON.
-            1. TIPO: maximo_percentual ou minimo_percentual.
-            2. LIMITES: Decimais (95% = 0.95).
-            3. MAPA_ATIVOS: CNPJs/Nomes -> categorias.
+            Auditor CVM 175: Transforme o regulamento em motor matemático JSON.
+            JSON: {{ "fundo": "NOME", "cnpj": "CNPJ", "mandato": "TEXTO", "regras": [{{ "id": "ID", "tipo": "minimo_percentual", "limite_min": 0.0, "categorias": ["CAT"] }}], "mapa_ativos": {{ "TERMO": "CAT" }}, "categorias_definidas": {{ "CAT": "DESC" }} }}
             TEXTO: {texto[:25000]}
             """
             res, motor = chamar_ia_hydra(prompt_auditoria)
@@ -139,15 +142,19 @@ elif menu == "📜 Regulamento e Compliance":
 
     if 'schema_v18' in st.session_state and st.button("💾 Ativar Cérebro no Banco"):
         d = st.session_state['schema_v18']
+        # Payload com nomes de colunas IGUAIS ao SQL (v18.1)
         payload = {
             "fundo_nome": d.get('fundo') or d.get('nome_fundo'),
             "cnpj": d.get('cnpj'),
-            "descricao_mandato": d.get('mandato') or d.get('descricao'), # Consertado!
-            "regras_json": d.get('regras'),
-            "mapa_ativos_json": d.get('mapa_ativos'),
-            "categorias_definidas": d.get('categorias_definidas')
+            "descricao_mandato": d.get('mandato') or d.get('descricao'),
+            "regras_json": d['regras'],
+            "mapa_ativos_json": d['mapa_ativos'],
+            "categorias_definidas": d['categorias_definidas']
         }
-        conn.table("regulamentos").upsert(payload, on_conflict="fundo_nome").execute()
-        st.success("Regulamento vinculado!")
-        del st.session_state['schema_v18']
-        st.rerun()
+        try:
+            conn.table("regulamentos").upsert(payload, on_conflict="fundo_nome").execute()
+            st.success("Regulamento salvo e erro corrigido!")
+            del st.session_state['schema_v18']
+            st.rerun()
+        except Exception as e:
+            st.error(f"Erro ao salvar: {e}")
