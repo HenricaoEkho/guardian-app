@@ -5,8 +5,8 @@ import google.generativeai as genai
 import json
 from pypdf import PdfReader
 
-# --- 1. CONFIGURAÇÃO ---
-st.set_page_config(page_title="Guardian Ultra v13.2", layout="wide", page_icon="🛡️")
+# --- CONFIGURAÇÃO ---
+st.set_page_config(page_title="Guardian Auditor v14", layout="wide", page_icon="🛡️")
 
 def format_br(valor, prefixo="R$ "):
     try:
@@ -14,7 +14,7 @@ def format_br(valor, prefixo="R$ "):
         return f"{prefixo}{val:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
     except: return str(valor)
 
-# --- 2. CONEXÃO IA ---
+# --- CONEXÃO IA ---
 gemini_key = st.secrets.get("GEMINI_API_KEY")
 if gemini_key:
     genai.configure(api_key=gemini_key)
@@ -27,103 +27,119 @@ def chamar_ia_hydra(prompt):
             model = genai.GenerativeModel(m)
             return model.generate_content(prompt), m
         except: continue
-    raise Exception("Sistema Hydra: Todos os modelos falharam.")
+    raise Exception("Falha total nos modelos de IA.")
 
 conn = st.connection("supabase", type=SupabaseConnection)
 
-# --- 3. SIDEBAR ---
-st.sidebar.title("🛡️ Guardian Ultra v13.2")
+# --- SIDEBAR ---
+st.sidebar.title("🛡️ Guardian Auditor")
 try:
     res_f = conn.table("carteira_diaria").select("fundo_nome").execute()
     lista_fundos = sorted(list(set([i['fundo_nome'] for i in res_f.data]))) if res_f.data else []
 except: lista_fundos = []
 
-fundo_ativo = st.sidebar.selectbox("Fundo Ativo:", lista_fundos if lista_fundos else ["Nenhum cadastrado"])
-menu = st.sidebar.radio("Ir para:", ["📊 Dashboard", "🤖 Importar Carteira", "📜 Regulamento e Compliance", "📉 Gestão de Passivo"])
+fundo_ativo = st.sidebar.selectbox("Selecionar Fundo:", lista_fundos if lista_fundos else ["Nenhum cadastrado"])
+menu = st.sidebar.radio("Navegação:", ["📊 Dashboard", "🤖 Importar Carteira", "📜 Regulamento e Compliance"])
 
-# --- 4. 📊 DASHBOARD ---
+# --- 📊 DASHBOARD (SINCRONIA TOTAL) ---
 if menu == "📊 Dashboard":
-    st.subheader(f"📊 Monitor de Compliance: {fundo_ativo}")
+    st.subheader(f"📊 Painel de Compliance: {fundo_ativo}")
     if fundo_ativo != "Nenhum cadastrado":
         c = conn.table("carteira_diaria").select("*").eq("fundo_nome", fundo_ativo).execute()
         r = conn.table("regulamentos").select("*").eq("fundo_nome", fundo_ativo).execute()
         
         if c.data:
             df_c = pd.DataFrame(c.data)
-            st.metric("PL Total", format_br(df_c['valor_mercado'].sum()))
+            pl_total = df_c['valor_mercado'].sum()
+            st.metric("Patrimônio Líquido Total", format_br(pl_total))
             
             if r.data:
                 reg = r.data[0]
-                # Busca no regras_json a regra id: 'min_deb_incentivadas'
-                meta = 0.0
-                for regra in reg['regras_json']:
-                    if 'min' in regra['id']: meta = regra['limite_min']
+                meta = reg['meta_minima_alvo'] if reg['meta_minima_alvo'] else 0.0
                 
-                v_alvo = df_c[df_c['tipo_ativo'].str.contains('Incentivada|Infra|Debênture', case=False, na=False)]['valor_mercado'].sum()
-                perc = v_alvo / df_c['valor_mercado'].sum() if not df_c.empty else 0
+                # Identifica ativos que batem com o mandato (Incentivadas, Master, etc)
+                v_alvo = df_c[df_c['tipo_ativo'].str.contains('Incentivada|Infra|Master|Debênture', case=False, na=False)]['valor_mercado'].sum()
+                perc = v_alvo / pl_total if pl_total > 0 else 0
                 
-                st.metric(f"Compliance (Meta {meta*100:.0f}%)", f"{perc*100:.2f}%", delta=f"{(perc-meta)*100:.2f}%")
+                status = "normal" if perc >= meta else "inverse"
+                st.metric(f"Enquadramento Alvo (Meta {meta*100:.1f}%)", f"{perc*100:.2f}%", 
+                          delta=f"{(perc-meta)*100:.2f}% vs Regulamento", delta_color=status)
             
-            st.dataframe(df_c[['ativo', 'valor_mercado', 'tipo_ativo']])
-        else: st.warning("Sem dados de carteira.")
+            st.write("### Itens em Carteira")
+            st.dataframe(df_c[['ativo', 'valor_mercado', 'tipo_ativo']].assign(valor_mercado=lambda x: x['valor_mercado'].apply(format_br)))
+        else: st.warning("⚠️ Sem carteira importada para este fundo.")
 
-# --- 5. 🤖 IMPORTAR CARTEIRA ---
+# --- 🤖 IMPORTAÇÃO ---
 elif menu == "🤖 Importar Carteira":
-    st.subheader("📥 Carga de Posição Diária")
+    st.subheader("📥 Carga Diária de Ativos")
     upload_c = st.file_uploader("Suba o Excel", type=['xlsx'])
-    if upload_c and st.button("🚀 Processar Carteira"):
+    if upload_c and st.button("🚀 Processar"):
         with st.spinner("IA Extraindo..."):
             df = pd.read_excel(upload_c)
-            res, motor = chamar_ia_hydra(f"JSON: {{'nome_fundo': 'NOME', 'ativos': [{{'ativo': 'NOME', 'valor_mercado': 0.0, 'tipo_ativo': 'TIPO'}}]}} DADOS: {df.head(200).to_string()}")
+            prompt = f"JSON: {{'nome_fundo': 'NOME', 'ativos': [{{'ativo': 'NOME', 'valor_mercado': 0.0, 'tipo_ativo': 'TIPO'}}]}} DADOS: {df.head(250).to_string()}"
+            res, motor = chamar_ia_hydra(prompt)
             data = json.loads(res.text[res.text.find('{'):res.text.rfind('}')+1])
             st.session_state['temp_c'] = data
             st.success(f"Extraído via {motor}")
             st.table(pd.DataFrame(data['ativos']))
 
-# --- 6. 📜 REGULAMENTO E COMPLIANCE (O PROMPT "MUUITO EFICAZ") ---
+    if 'temp_c' in st.session_state and st.button("💾 Salvar"):
+        d = st.session_state['temp_c']
+        for a in d['ativos']: a['fundo_nome'] = d['nome_fundo']
+        conn.table("carteira_diaria").insert(d['ativos']).execute()
+        st.success("Salvo!")
+        del st.session_state['temp_c']
+        st.rerun()
+
+# --- 📜 REGULAMENTO (O PROMPT ANTIVÍES) ---
 elif menu == "📜 Regulamento e Compliance":
-    st.subheader("📜 Arquiteto de Compliance")
-    upload_reg = st.file_uploader("Suba o PDF", type=['pdf'])
+    st.subheader("📜 Perícia de Regulamentos")
+    upload_reg = st.file_uploader("Suba o PDF do Regulamento", type=['pdf'])
     
-    if upload_reg and st.button("🚀 Mapear Compliance"):
-        with st.spinner("Analisando Anexo I e limites..."):
+    if upload_reg and st.button("🚀 Iniciar Perícia IA"):
+        with st.spinner("Analisando cláusulas permanentes..."):
             try:
                 reader = PdfReader(upload_reg)
                 texto = "".join([p.extract_text() for p in reader.pages[:20]])
                 
-                # SUPER PROMPT PARA CAPTURAR 85%/95% E IGNORAR 67%
-                super_prompt = f"""
-                Você é um Engenheiro de Compliance de Fundos (Resolução CVM 175). Analise o regulamento.
+                # O PROMPT PERFEITO: Diferencia carência de regra permanente
+                auditoria_prompt = f"""
+                Você é um Perito de Compliance da CVM. Analise o regulamento sem nenhum viés prévio.
                 
-                INSTRUÇÕES CRÍTICAS:
-                1. Ignore regras de 'carência' ou 'período inicial' (ex: 67% nos primeiros anos). Busque o limite PERMANENTE.
-                2. Diferencie: 
-                   - Limite Tributário (Lei 12.431): Geralmente 95% em ativos de infraestrutura.
-                   - Limite de Política de Investimento (Capítulo 6 do Anexo I): Geralmente 85% ou 95%.
-                3. Priorize o maior rigor (se houver conflito entre 85% e 95%, registre o 95% como meta tributária).
-                4. Crie o 'mapa_ativos' mapeando CNPJs citados para categorias.
+                REGRAS DE OURO:
+                1. IGNORE prazos de carência (ex: carência de 2 anos para 67%). Busque o limite PERMANENTE.
+                2. LOCALIZE no Anexo I o 'Limite Mínimo de Ativos de Infraestrutura'[cite: 173, 269].
+                3. BUSQUE no capítulo de tributação o limite para isenção (Lei 12.431), geralmente 95%.
+                4. MAPEIE no Anexo I a tabela de 'Limites de Concentração Máxima' (Emissor Único, FII, FIDC)[cite: 316, 319].
                 
-                JSON ESPERADO:
+                Retorne APENAS JSON:
                 {{
-                  "fundo": "NOME", "cnpj": "CNPJ", "descricao": "Mandato",
-                  "regras": [
-                    {{ "id": "min_deb_incentivadas", "limite_min": 0.95, "tipo": "minimo_percentual", "categorias": ["incentivadas"] }}
-                  ],
-                  "mapa_ativos": {{ "CNPJ_OU_NOME": "categoria" }}
+                  "fundo": "NOME_OFICIAL",
+                  "classe": "CATEGORIA",
+                  "meta_permanente": 0.0, 
+                  "limite_emissor": 0.0,
+                  "mapa_ativos": {{ "CNPJ/NOME": "CATEGORIA" }},
+                  "resumo_regras": [{{ "id": "id", "limite": 0.0, "texto": "descrição" }}]
                 }}
                 TEXTO: {texto[:10000]}
                 """
-                res, motor = chamar_ia_hydra(super_prompt)
+                res, motor = chamar_ia_hydra(auditoria_prompt)
                 data = json.loads(res.text[res.text.find('{'):res.text.rfind('}')+1])
-                st.session_state['schema_reg'] = data
+                st.session_state['pericia_reg'] = data
                 st.json(data)
             except Exception as e: st.error(f"Erro: {e}")
 
-    if 'schema_reg' in st.session_state and st.button("💾 Salvar Estrutura"):
-        d = st.session_state['schema_reg']
-        payload = {{
-            "fundo_nome": d.get('fundo'), "cnpj": d.get('cnpj'), "descricao_mandato": d.get('descricao'),
-            "regras_json": d.get('regras'), "mapa_ativos_json": d.get('mapa_ativos'), "texto_bruto": "v13.2"
-        }}
+    if 'pericia_reg' in st.session_state and st.button("💾 Salvar Inteligência"):
+        d = st.session_state['pericia_reg']
+        payload = {
+            "fundo_nome": d['fundo'],
+            "classe_fundo": d['classe'],
+            "meta_minima_alvo": d['meta_permanente'],
+            "limite_emissor": d['limite_emissor'],
+            "regras_json": d['resumo_regras'],
+            "mapa_ativos_json": d['mapa_ativos']
+        }
         conn.table("regulamentos").upsert(payload, on_conflict="fundo_nome").execute()
-        st.success("Salvo!")
+        st.success("Cérebro do Fundo Atualizado!")
+        del st.session_state['pericia_reg']
+        st.rerun()
