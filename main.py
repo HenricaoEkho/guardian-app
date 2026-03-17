@@ -6,7 +6,7 @@ import json
 from pypdf import PdfReader
 
 # --- CONFIGURAÇÃO E FORMATAÇÃO ---
-st.set_page_config(page_title="Guardian Ultra v10", layout="wide", page_icon="🛡️")
+st.set_page_config(page_title="Guardian Ultra v10.1", layout="wide", page_icon="🛡️")
 
 def format_br(valor, prefixo="R$ "):
     try:
@@ -21,8 +21,8 @@ if gemini_key:
 
 MODELOS = [
     'models/gemini-1.5-flash', 
-    'models/gemini-2.5-flash-lite', 
-    'models/gemini-3.1-flash-lite-preview'
+    'models/gemini-3.1-flash-lite-preview',
+    'models/gemini-2.5-flash-lite'
 ]
 
 def chamar_ia_hydra(prompt):
@@ -31,11 +31,11 @@ def chamar_ia_hydra(prompt):
             model = genai.GenerativeModel(m)
             return model.generate_content(prompt), m
         except: continue
-    raise Exception("Sistema Hydra: Todos os modelos falharam.")
+    raise Exception("Sistema Hydra: Sem modelos disponíveis no momento.")
 
 conn = st.connection("supabase", type=SupabaseConnection)
 
-# --- SIDEBAR: NAVEGAÇÃO E SELEÇÃO DE FUNDO ---
+# --- SIDEBAR ---
 st.sidebar.title("🛡️ Guardian Ultra")
 try:
     res_f = conn.table("carteira_diaria").select("fundo_nome").execute()
@@ -45,7 +45,7 @@ except: lista_fundos = []
 fundo_ativo = st.sidebar.selectbox("Fundo em Análise:", lista_fundos if lista_fundos else ["Nenhum cadastrado"])
 menu = st.sidebar.radio("Ir para:", ["📊 Dashboard", "🤖 Importar Carteira", "📜 Regulamento", "📉 Gestão de Passivo"])
 
-# --- ABA 1: DASHBOARD (COMPLIANCE) ---
+# --- 📊 ABA DASHBOARD (COMPLIANCE) ---
 if menu == "📊 Dashboard":
     st.subheader(f"📊 Painel de Compliance: {fundo_ativo}")
     if fundo_ativo != "Nenhum cadastrado":
@@ -56,7 +56,7 @@ if menu == "📊 Dashboard":
             df_c = pd.DataFrame(c.data)
             pl_total = df_c['valor_mercado'].sum()
             
-            # Busca metas do regulamento ou usa padrão
+            # Busca metas extraídas pela IA ou usa padrão
             meta_inc = r.data[0]['meta_incentivadas'] if r.data else 85.0
             
             v_inc = df_c[df_c['tipo_ativo'].str.contains('Incentivada', case=False, na=False)]['valor_mercado'].sum()
@@ -77,24 +77,27 @@ if menu == "📊 Dashboard":
             st.write("### Composição Atual")
             st.bar_chart(df_c.groupby('tipo_ativo')['valor_mercado'].sum())
         else:
-            st.info("Importe uma carteira para ver a análise.")
+            st.info("Suba a carteira para ver a análise.")
 
-# --- ABA 2: IMPORTAR CARTEIRA ---
+# --- 🤖 ABA IMPORTAR CARTEIRA ---
 elif menu == "🤖 Importar Carteira":
-    st.subheader("📥 Carga de Ativos e Despesas")
+    st.subheader("📥 Carga de Ativos")
     upload_c = st.file_uploader("Suba o Excel diário", type=['xlsx'])
     if upload_c:
         if st.button("🚀 Processar Carteira"):
             with st.spinner("IA extraindo dados..."):
-                df = pd.read_excel(upload_c)
-                contexto = df.dropna(how='all').head(300).to_string()
-                prompt = f"Analise e extraia para JSON: {{'nome_fundo': 'NOME', 'resumo': {{'pl': 0.0, 'cota': 0.0}}, 'ativos': [{{'ativo': 'NOME', 'valor_mercado': 0.0, 'tipo_ativo': 'TIPO'}}], 'despesas': [{{'item': 'NOME', 'valor': 0.0}}]}} DADOS: {contexto}"
-                res, motor = chamar_ia_hydra(prompt)
-                data = json.loads(res.text[res.text.find('{'):res.text.rfind('}')+1])
-                st.session_state['temp_c'] = data
-                st.success(f"Extraído via {motor}")
-                st.write(f"Fundo: {data['nome_fundo']}")
-                st.table(pd.DataFrame(data['ativos']).assign(valor_mercado=lambda x: x['valor_mercado'].apply(format_br)))
+                try:
+                    df = pd.read_excel(upload_c)
+                    contexto = df.dropna(how='all').head(300).to_string()
+                    prompt = f"Extraia em JSON: {{'nome_fundo': 'NOME', 'resumo': {{'pl': 0.0, 'cota': 0.0}}, 'ativos': [{{'ativo': 'NOME', 'valor_mercado': 0.0, 'tipo_ativo': 'TIPO'}}], 'despesas': [{{'item': 'NOME', 'valor': 0.0}}]}} DADOS: {contexto}"
+                    res, motor = chamar_ia_hydra(prompt)
+                    data = json.loads(res.text[res.text.find('{'):res.text.rfind('}')+1])
+                    st.session_state['temp_c'] = data
+                    st.success(f"Extraído via {motor}")
+                    st.write(f"Fundo: {data['nome_fundo']}")
+                    st.table(pd.DataFrame(data['ativos']).assign(valor_mercado=lambda x: x['valor_mercado'].apply(format_br)))
+                except Exception as e:
+                    st.error(f"Erro no processamento: {e}")
 
         if 'temp_c' in st.session_state:
             if st.button("💾 Gravar no Supabase"):
@@ -107,7 +110,7 @@ elif menu == "🤖 Importar Carteira":
                 del st.session_state['temp_c']
                 st.rerun()
 
-# --- ABA 3: REGULAMENTO (A "SAFAZ") ---
+# --- 📜 ABA REGULAMENTO ("SAFAZ") ---
 elif menu == "📜 Regulamento":
     st.subheader("📜 Inteligência de Regulamentos")
     upload_reg = st.file_uploader("Suba o Regulamento (PDF)", type=['pdf'])
@@ -115,49 +118,53 @@ elif menu == "📜 Regulamento":
     if upload_reg:
         if st.button("🚀 Ler e Extrair Regras"):
             with st.spinner("IA lendo PDF e identificando cláusulas..."):
-                # Extração de texto do PDF
-                reader = PdfReader(upload_reg)
-                texto_completo = ""
-                for page in reader.pages[:10]: # Lemos as primeiras 10 páginas (onde ficam as regras)
-                    texto_completo += page.extract_text()
-                
-                prompt_reg = f"""
-                Você é um Advogado de Compliance. Extraia do texto do regulamento:
-                1. NOME_FUNDO: Nome oficial.
-                2. REGRAS: Identifique limites de % (Incentivadas, Emissor Único, Ações, etc).
-                
-                Retorne APENAS JSON:
-                {{
-                  "nome_fundo": "NOME",
-                  "regras": {{ "min_incentivadas": 85.0, "max_emissor": 20.0, "outras_regras": "texto" }}
-                }}
-                TEXTO: {texto_completo[:5000]}
-                """
-                res, motor = chamar_ia_hydra(prompt_reg)
-                reg_data = json.loads(res.text[res.text.find('{'):res.text.rfind('}')+1])
-                st.session_state['temp_reg'] = reg_data
-                st.success(f"Regulamento analisado via {motor}")
+                try:
+                    # Extração real do PDF
+                    reader = PdfReader(upload_reg)
+                    texto_completo = ""
+                    for page in reader.pages[:15]: # Lemos as primeiras 15 páginas
+                        texto_completo += page.extract_text()
+                    
+                    prompt_reg = f"""
+                    Você é um Analista de Compliance. Extraia do texto do regulamento os limites de enquadramento.
+                    Foques em limites percentuais (Incentivadas, Emissor Único, etc).
+                    
+                    Retorne APENAS JSON:
+                    {{
+                      "nome_fundo": "NOME",
+                      "regras": {{ "min_incentivadas": 85.0, "max_emissor": 20.0, "outras_regras": "texto descritivo" }}
+                    }}
+                    TEXTO: {texto_completo[:8000]} 
+                    """
+                    res, motor = chamar_ia_hydra(prompt_reg)
+                    reg_data = json.loads(res.text[res.text.find('{'):res.text.rfind('}')+1])
+                    st.session_state['temp_reg'] = reg_data
+                    st.success(f"Regulamento analisado via {motor}")
+                except Exception as e:
+                    st.error(f"Erro ao ler PDF: {e}")
 
         if 'temp_reg' in st.session_state:
             reg = st.session_state['temp_reg']
-            st.write(f"### Regras de {reg['nome_fundo']}")
+            st.write(f"### Regras Extraídas para: {reg['nome_fundo']}")
             st.json(reg['regras'])
             
-            # Lógica de Substituição
             exists = conn.table("regulamentos").select("id").eq("fundo_nome", reg['nome_fundo']).execute()
-            confirmar = True
-            if exists.data:
-                st.warning(f"O fundo '{reg['nome_fundo']}' já possui regras. Deseja sobrescrever?")
-                confirmar = st.checkbox("Sim, substituir regras antigas")
+            pode_salvar = True
             
-            if confirmar and st.button("💾 Salvar Regulamento"):
-                payload = {
-                    "fundo_nome": reg['nome_fundo'],
-                    "meta_incentivadas": reg['regras'].get('min_incentivadas', 85.0),
-                    "limite_emissor": reg['regras'].get('max_emissor', 20.0),
-                    "regras_json": reg['regras'],
-                    "texto_regulamento": "Conteúdo extraído do PDF"
-                }
-                conn.table("regulamentos").upsert(payload, on_conflict="fundo_nome").execute()
-                st.success("Regulamento salvo!")
-                del st.session_state['temp_reg']
+            if exists.data:
+                st.warning(f"O fundo '{reg['nome_fundo']}' já existe. Deseja substituir?")
+                pode_salvar = st.checkbox("Confirmar substituição das regras")
+            
+            if pode_salvar:
+                if st.button("💾 Salvar Regulamento"):
+                    payload = {
+                        "fundo_nome": reg['nome_fundo'],
+                        "meta_incentivadas": reg['regras'].get('min_incentivadas', 85.0),
+                        "limite_emissor": reg['regras'].get('max_emissor', 20.0),
+                        "regras_json": reg['regras'],
+                        "texto_regulamento": "Conteúdo extraído via IA"
+                    }
+                    conn.table("regulamentos").upsert(payload, on_conflict="fundo_nome").execute()
+                    st.success("Regulamento salvo!")
+                    del st.session_state['temp_reg']
+                    st.rerun()
