@@ -5,8 +5,8 @@ import google.generativeai as genai
 import json
 from pypdf import PdfReader
 
-# --- CONFIGURAÇÃO ---
-st.set_page_config(page_title="Guardian Auditor v14", layout="wide", page_icon="🛡️")
+# --- 1. CONFIGURAÇÃO E FORMATAÇÃO ---
+st.set_page_config(page_title="Guardian Sniper v15", layout="wide", page_icon="🛡️")
 
 def format_br(valor, prefixo="R$ "):
     try:
@@ -14,7 +14,7 @@ def format_br(valor, prefixo="R$ "):
         return f"{prefixo}{val:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
     except: return str(valor)
 
-# --- CONEXÃO IA ---
+# --- 2. CONEXÃO IA HÍBRIDA ---
 gemini_key = st.secrets.get("GEMINI_API_KEY")
 if gemini_key:
     genai.configure(api_key=gemini_key)
@@ -31,20 +31,21 @@ def chamar_ia_hydra(prompt):
 
 conn = st.connection("supabase", type=SupabaseConnection)
 
-# --- SIDEBAR ---
-st.sidebar.title("🛡️ Guardian Auditor")
+# --- 3. SIDEBAR: NAVEGAÇÃO ---
+st.sidebar.title("🛡️ Guardian Sniper")
 try:
+    # Busca nomes de fundos que já possuem regulamento cadastrado
     res_f = conn.table("regulamentos").select("fundo_nome").execute()
     lista_fundos = sorted(list(set([i['fundo_nome'] for i in res_f.data]))) if res_f.data else []
 except: lista_fundos = []
 
-fundo_ativo = st.sidebar.selectbox("Fundo em Análise:", lista_fundos if lista_fundos else ["Nenhum"])
-menu = st.sidebar.radio("Navegação:", ["📊 Dashboard", "🤖 Importar Carteira", "📜 Regulamento e Compliance"])
+fundo_ativo = st.sidebar.selectbox("Fundo Ativo:", lista_fundos if lista_fundos else ["Nenhum cadastrado"])
+menu = st.sidebar.radio("Ir para:", ["📊 Dashboard", "🤖 Importar Carteira", "📜 Regulamento e Compliance", "📉 Gestão de Passivo"])
 
-# --- 📊 DASHBOARD (ALINHADO COM O NOVO JSON) ---
+# --- 4. 📊 ABA: DASHBOARD ---
 if menu == "📊 Dashboard":
-    st.subheader(f"📊 Compliance: {fundo_ativo}")
-    if fundo_ativo != "Nenhum":
+    st.subheader(f"📊 Compliance de Risco: {fundo_ativo}")
+    if fundo_ativo != "Nenhum cadastrado":
         r = conn.table("regulamentos").select("*").eq("fundo_nome", fundo_ativo).execute()
         c = conn.table("carteira_diaria").select("*").eq("fundo_nome", fundo_ativo).execute()
         
@@ -53,84 +54,106 @@ if menu == "📊 Dashboard":
             df_c = pd.DataFrame(c.data)
             pl_total = df_c['valor_mercado'].sum()
             
-            # Puxa a primeira regra de mínimo do JSON
-            regra_min = next((x for x in reg['regras_json'] if x['tipo'] == 'minimo_percentual'), None)
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Patrimônio Líquido", format_br(pl_total))
+            c2.metric("Público-Alvo", reg['publico_alvo'])
+            c3.metric("Responsabilidade", reg['responsabilidade_cotista'])
             
-            if regra_min:
-                meta = regra_min['limite_min']
-                cats = regra_min['categorias']
-                # Filtra ativos que pertencem às categorias da regra
-                v_alvo = df_c[df_c['tipo_ativo'].str.lower().isin([c.lower() for c in cats])]['valor_mercado'].sum()
-                perc = v_alvo / pl_total if pl_total > 0 else 0
+            st.divider()
+            
+            col_a, col_b = st.columns(2)
+            with col_a:
+                st.write("### 🏢 Limites por Emissor")
+                st.table(reg['limites_emissor'])
+            with col_b:
+                st.write("### 📈 Limites por Modalidade")
+                st.table(reg['limites_modalidade'])
                 
-                c1, c2 = st.columns(2)
-                c1.metric("PL Total", format_br(pl_total))
-                status = "normal" if perc >= meta else "inverse"
-                c2.metric(f"Enquadramento ({regra_min['id']})", f"{perc*100:.2f}%", 
-                          delta=f"{(perc-meta)*100:.2f}% vs Meta {meta*100:.0f}%", delta_color=status)
-            
-            st.write("### Itens da Carteira")
-            st.dataframe(df_c[['ativo', 'valor_mercado', 'tipo_ativo']])
-        else: st.info("Aguardando dados de Carteira e Regulamento.")
+            with st.expander("🚫 Vedações e Derivativos"):
+                st.write("**Regras de Derivativos:**", reg['derivativos_regras'])
+                st.write("**Vedações Principais:**", reg['vedacoes'])
+        else:
+            st.info("Aguardando carga de carteira para este fundo.")
 
-# --- 🤖 IMPORTAR CARTEIRA ---
+# --- 5. 🤖 ABA: IMPORTAR CARTEIRA ---
 elif menu == "🤖 Importar Carteira":
-    st.subheader("📥 Carga de Posição")
-    # [Código de importação mantido...]
+    st.subheader("📥 Carga de Posição Diária")
+    upload_c = st.file_uploader("Suba o Excel", type=['xlsx'])
+    if upload_c and st.button("🚀 Processar Carteira"):
+        with st.spinner("IA Analisando ativos..."):
+            df = pd.read_excel(upload_c)
+            # Prompt simplificado para carteira
+            prompt_c = f"Extraia em JSON: {{'nome_fundo': 'NOME', 'ativos': [{{'ativo': 'NOME', 'valor_mercado': 0.0, 'tipo_ativo': 'TIPO'}}]}} DADOS: {df.head(250).to_string()}"
+            res, motor = chamar_ia_hydra(prompt_c)
+            data = json.loads(res.text[res.text.find('{'):res.text.rfind('}')+1])
+            st.session_state['temp_c'] = data
+            st.success(f"Extraído via {motor}")
+            st.table(pd.DataFrame(data['ativos']).assign(valor_mercado=lambda x: x['valor_mercado'].apply(format_br)))
 
-# --- 📜 REGULAMENTO (O PROMPT "ANTI-CAGADA") ---
+    if 'temp_c' in st.session_state and st.button("💾 Gravar no Banco"):
+        d = st.session_state['temp_c']
+        for a in d['ativos']: a['fundo_nome'] = d['nome_fundo']
+        conn.table("carteira_diaria").insert(d['ativos']).execute()
+        st.success("Carteira salva!")
+        del st.session_state['temp_c']
+        st.rerun()
+
+# --- 6. 📜 ABA: REGULAMENTO (O NOVO PROMPT SNIPER) ---
 elif menu == "📜 Regulamento e Compliance":
-    st.subheader("📜 Perícia de Regulamentos (Assertiva)")
-    upload_reg = st.file_uploader("Suba o PDF (Ex: FIC FIDC)", type=['pdf'])
+    st.subheader("📜 Perícia de Regulamentos (Resolução CVM 175)")
+    upload_reg = st.file_uploader("Suba o Regulamento (PDF)", type=['pdf'])
     
-    if upload_reg and st.button("🚀 Iniciar Perícia"):
-        with st.spinner("IA identificando classe e limites reais..."):
+    if upload_reg and st.button("🚀 Iniciar Análise Sniper"):
+        with st.spinner("IA executando leitura técnica do Anexo I..."):
             try:
                 reader = PdfReader(upload_reg)
                 texto = "".join([p.extract_text() for p in reader.pages[:20]])
                 
-                # O PROMPT QUE SEGUE SEU EXEMPLO JSON
-                prompt_auditoria = f"""
-                Você é um Engenheiro de Compliance de Fundos. Analise o regulamento de forma RIGOROSA.
-                
-                OBJETIVO: Gerar um JSON de inteligência sem alucinar leis que não estão no texto.
-                
-                TAREFAS:
-                1. Identifique o Nome do Fundo e o CNPJ.
-                2. Determine a CLASSE (Ex: FIC-FIDC [cite: 380]).
-                3. Busque a 'Política de Investimento' e 'Limites de Concentração'[cite: 537, 562].
-                4. Localize o percentual MÍNIMO de enquadramento (Ex: 67% em FIC-FIDC ).
-                5. Crie um 'mapa_ativos' vinculando termos da carteira às categorias das regras.
-                
-                ESTRUTURA DE SAÍDA (SIGA SEU EXEMPLO):
-                {{
-                  "fundo": "NOME", "cnpj": "CNPJ", "descricao": "Mandato",
-                  "regras": [
-                    {{ "id": "min_fidc", "tipo": "minimo_percentual", "limite_min": 0.67, "categorias": ["fidc"] }}
-                  ],
-                  "mapa_ativos": {{ "NOME/TERMO": "fidc" }},
-                  "categorias_definidas": {{ "fidc": "Fundo de Investimento em Direitos Creditórios" }}
-                }}
-                TEXTO: {texto[:10000]}
-                """
-                res, motor = chamar_ia_hydra(prompt_auditoria)
-                data = json.loads(res.text[res.text.find('{'):res.text.rfind('}')+1])
-                st.session_state['pericia_reg'] = data
-                st.json(data)
-                st.success(f"Análise via {motor}")
-            except Exception as e: st.error(f"Erro: {e}")
+                # O SEU NOVO PROMPT SNIPER
+                sniper_prompt = f"""
+                Você é um Analista de Compliance Sênior especialista em fundos brasileiros (Resolução CVM 175). 
+                Seu objetivo é ler o regulamento e o Anexo I fornecidos e extrair EXATAMENTE os limites de risco e investimento em formato JSON.
 
-    if 'pericia_reg' in st.session_state and st.button("💾 Salvar Inteligência"):
-        d = st.session_state['pericia_reg']
+                Instruções Críticas:
+                1. Busque pelas tabelas de 'Limites por Emissor', 'Limites por Modalidade' e 'Parâmetros de Derivativos/Alavancagem'.
+                2. Se o fundo for um 'Fundo de Investimento em Cotas' (FIC), verifique se o limite se aplica à classe ou à classe investida.
+                3. Identifique o regime de responsabilidade dos cotistas (Limitada ou Ilimitada).
+                4. Extraia as regras de 'Concentração Máxima' e 'Vedações'.
+
+                Estrutura de Saída (JSON):
+                {{
+                  "fundo": "Nome Completo e CNPJ",
+                  "publico_alvo": "...",
+                  "responsabilidade_cotista": "Limitada/Ilimitada",
+                  "limites_emissor": [{{ "emissor": "...", "limite_individual": "...", "limite_conjunto": "..." }}],
+                  "limites_modalidade": [{{ "ativo": "...", "limite_max": "..." }}],
+                  "derivativos": {{ "permite_alavancagem": "Sim/Não", "margem_maxima": "...", "objetivo": "Hedge/Alavancagem" }},
+                  "vedacoes_principais": ["item 1", "item 2"]
+                }}
+
+                Responda APENAS o código JSON puro, sem textos explicativos.
+                TEXTO DO REGULAMENTO: {texto[:10000]}
+                """
+                res, motor = chamar_ia_hydra(sniper_prompt)
+                reg_data = json.loads(res.text[res.text.find('{'):res.text.rfind('}')+1])
+                st.session_state['sniper_reg'] = reg_data
+                st.success(f"Análise concluída via {motor}")
+                st.json(reg_data)
+            except Exception as e: st.error(f"Erro na Perícia: {e}")
+
+    if 'sniper_reg' in st.session_state and st.button("💾 Salvar Regulamento e Vincular"):
+        d = st.session_state['sniper_reg']
         payload = {
             "fundo_nome": d['fundo'],
-            "cnpj": d.get('cnpj'),
-            "classe_fundo": d.get('classe'),
-            "regras_json": d['regras'],
-            "mapa_ativos_json": d['mapa_ativos'],
-            "categorias_definidas": d.get('categorias_definidas')
+            "cnpj": "Identificado no JSON",
+            "publico_alvo": d['publico_alvo'],
+            "responsabilidade_cotista": d['responsabilidade_cotista'],
+            "limites_emissor": d['limites_emissor'],
+            "limites_modalidade": d['limites_modalidade'],
+            "derivativos_regras": d['derivativos'],
+            "vedacoes": d['vedacoes_principais']
         }
         conn.table("regulamentos").upsert(payload, on_conflict="fundo_nome").execute()
-        st.success("Regras de FIC-FIDC salvas com sucesso!")
-        del st.session_state['pericia_reg']
+        st.success(f"Cérebro de Compliance de '{d['fundo']}' ativado!")
+        del st.session_state['sniper_reg']
         st.rerun()
