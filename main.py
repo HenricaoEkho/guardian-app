@@ -18,21 +18,26 @@ gemini_key = st.secrets.get("GEMINI_API_KEY")
 if gemini_key:
     genai.configure(api_key=gemini_key)
 
-# Função Inteligente de Fallback (Troca Automática)
+# Função de Fallback Aprimorada (Sem o prefixo models/ que às vezes causa conflito)
 def extrair_dados_com_ia(prompt):
-    try:
-        # Tenta o modelo 2.5 (O mais potente, limite de 20/dia)
-        model = genai.GenerativeModel('models/gemini-2.5-flash')
-        response = model.generate_content(prompt)
-        return response, "Gemini 2.5 Flash (Elite)"
-    except Exception as e:
-        if "429" in str(e): # Se estourar a cota...
-            # Troca para o 1.5 (Limite de 1.500/dia)
-            model = genai.GenerativeModel('models/gemini-1.5-flash')
+    # Lista de modelos para tentar (em ordem de preferência)
+    tentativas = [
+        ("gemini-2.5-flash", "Elite (2.5)"),
+        ("gemini-1.5-flash", "Reserva de Guerra (1.5)")
+    ]
+    
+    erros = []
+    for model_id, label in tentativas:
+        try:
+            model = genai.GenerativeModel(model_id)
             response = model.generate_content(prompt)
-            return response, "Gemini 1.5 Flash (Reserva de Guerra)"
-        else:
-            raise e
+            return response, label
+        except Exception as e:
+            erros.append(f"{model_id}: {str(e)}")
+            continue # Tenta o próximo da lista
+            
+    # Se todos falharem, levanta o erro com os detalhes
+    raise Exception(f"Falha em todos os modelos: {'; '.join(erros)}")
 
 conn = st.connection("supabase", type=SupabaseConnection)
 
@@ -40,10 +45,10 @@ conn = st.connection("supabase", type=SupabaseConnection)
 st.sidebar.title("🛡️ Guardian Ultra")
 menu = st.sidebar.radio("Navegação", ["📊 Dashboard", "🤖 Importar Carteira", "📉 Gestão de Passivo", "📜 Regras & Regulamento"])
 
-# --- 1. IMPORTAR CARTEIRA AUTOMÁTICA ---
+# --- 1. IMPORTAR CARTEIRA ---
 if menu == "🤖 Importar Carteira":
-    st.subheader("📥 Carga de Dados Inteligente com Auto-Switch")
-    st.info("O sistema tentará o Gemini 2.5. Se a cota acabar, mudará para o 1.5 automaticamente.")
+    st.subheader("📥 Carga de Dados Inteligente")
+    st.info("O sistema tenta o Gemini 2.5. Se falhar ou acabar a cota, ele pula pro 1.5 sozinho.")
     
     uploaded_file = st.file_uploader("Suba o Excel ou PDF", type=['xlsx', 'pdf'])
 
@@ -51,13 +56,14 @@ if menu == "🤖 Importar Carteira":
         if st.button("🚀 Iniciar Processamento IA"):
             with st.spinner("IA analisando dados..."):
                 try:
+                    # Carrega os dados do arquivo
                     df = pd.read_excel(uploaded_file) if uploaded_file.name.endswith('.xlsx') else pd.read_csv(uploaded_file)
                     contexto = df.dropna(how='all').head(250).to_string()
                     
                     prompt = f"""
                     Aja como Senior de Compliance. Extraia do relatório:
                     1. NOME_FUNDO: Nome completo do fundo no cabeçalho.
-                    2. ATIVOS: Identifique detalhadamente (Debênture Incentivada Lei 12.431 vs Comum).
+                    2. ATIVOS: Diferencie 'Debênture Incentivada' (Lei 12.431) de 'Debênture Comum'.
                     3. DESPESAS: Todos os custos (Sempre positivos no JSON).
                     4. RESUMO: Patrimônio Líquido e Cota.
                     
@@ -71,7 +77,10 @@ if menu == "🤖 Importar Carteira":
                     """
                     
                     response, motor_usado = extrair_dados_com_ia(prompt)
-                    data = json.loads(response.text[response.text.find('{'):response.text.rfind('}')+1])
+                    
+                    # Extração segura do JSON
+                    raw_text = response.text
+                    data = json.loads(raw_text[raw_text.find('{'):raw_text.rfind('}')+1])
                     
                     st.session_state['import_data'] = data
                     st.success(f"📌 Fundo Identificado: **{data['nome_fundo']}** (via {motor_usado})")
@@ -83,19 +92,20 @@ if menu == "🤖 Importar Carteira":
                     t1, t2 = st.tabs(["📄 Ativos Detalhados", "💸 Despesas"])
                     with t1:
                         df_ativos = pd.DataFrame(data['ativos'])
-                        st.table(df_ativos.assign(valor_mercado=df_ativos['valor_mercado'].apply(format_br)))
+                        if not df_ativos.empty:
+                            st.table(df_ativos.assign(valor_mercado=df_ativos['valor_mercado'].apply(format_br)))
                     with t2:
                         st.table(pd.DataFrame(data['despesas']))
 
                 except Exception as e:
-                    st.error(f"Erro no processamento: {e}")
+                    st.error(f"Erro no motor da IA: {e}")
 
-        # Botão de salvar (só aparece se houver dados na memória)
         if 'import_data' in st.session_state:
             if st.button("💾 Confirmar e Salvar no Supabase"):
                 data = st.session_state['import_data']
                 fundo = data['nome_fundo']
                 
+                # Tag do fundo e ajuste de despesas
                 for a in data['ativos']: a['fundo_nome'] = fundo
                 desp_final = [{"fundo_nome": fundo, "item": d['item'], "valor": -abs(d['valor'])} for d in data['despesas']]
                 
@@ -106,23 +116,16 @@ if menu == "🤖 Importar Carteira":
                 st.balloons()
                 del st.session_state['import_data']
 
-# --- 2. DASHBOARD ---
+# --- DASHBOARD E OUTROS ---
 elif menu == "📊 Dashboard":
+    st.info("Selecione um fundo na barra lateral para ver os dados.")
+    # Lógica de dashboard simplificada para teste
     try:
         res = conn.table("carteira_diaria").select("fundo_nome").execute()
         fundos = list(set([i['fundo_nome'] for i in res.data])) if res.data else []
-        fundo_sel = st.sidebar.selectbox("Fundo Ativo:", fundos if fundos else ["Nenhum cadastrado"])
-        
-        if fundo_sel != "Nenhum cadastrado":
-            st.subheader(f"📊 Painel Consolidado: {fundo_sel}")
+        fundo_sel = st.sidebar.selectbox("Fundo:", fundos)
+        if fundo_sel:
+            st.write(f"### Dados de {fundo_sel}")
             c = conn.table("carteira_diaria").select("*").eq("fundo_nome", fundo_sel).execute()
-            df_c = pd.DataFrame(c.data)
-            
-            st.metric("PL Total do Fundo", format_br(df_c['valor_mercado'].sum()))
-            st.dataframe(df_c, use_container_width=True)
-    except:
-        st.info("Suba uma carteira para ver o Dashboard.")
-
-# --- 3. PASSIVO E REGULAMENTO (EM BREVE) ---
-else:
-    st.info("Aba em desenvolvimento. Próxima etapa: Upload de PDF de Regulamento.")
+            st.dataframe(pd.DataFrame(c.data))
+    except: pass
