@@ -83,3 +83,10 @@ else:
             st.dataframe(df_banco, use_container_width=True)
             
             # Pequeno gráfico de pizza para dar um tchan
+            if 'tipo_ativo' in df_banco.columns:
+                st.write("Distribuição por Tipo:")
+                st.pie_chart(df_banco['tipo_ativo'].value_counts())
+        else:
+            st.info("O banco de dados está vazio. Vá em 'Importar com IA'.")
+    except Exception as e:
+        st.error(f"Erro ao carregar banco: {e}")
