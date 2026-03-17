@@ -4,70 +4,75 @@ from st_supabase_connection import SupabaseConnection
 import google.generativeai as genai
 import json
 
-st.set_page_config(page_title="Guardian AI", layout="wide", page_icon="🛡️")
-st.title("🛡️ Guardian: Inteligência de Dados")
+st.set_page_config(page_title="Guardian AI v2", layout="wide", page_icon="🛡️")
+st.title("🛡️ Guardian: Inteligência Financeira")
 
 # --- CONEXÃO IA ---
 gemini_key = st.secrets.get("GEMINI_API_KEY")
-
-if not gemini_key:
-    st.error("⚠️ API Key não encontrada!")
-    st.stop()
-
 genai.configure(api_key=gemini_key)
 
-# --- JOGADA DE MESTRE: LISTAR MODELOS DISPONÍVEIS ---
-st.sidebar.subheader("🔍 Status da IA")
-try:
-    available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-    st.sidebar.write("Modelos encontrados:")
-    st.sidebar.code(available_models)
-    
-    # Tentamos pegar o 1.5-flash, se não tiver, pegamos o primeiro da lista
-    chosen_model = 'models/gemini-1.5-flash' if 'models/gemini-1.5-flash' in available_models else available_models[0]
-    model = genai.GenerativeModel(chosen_model)
-    st.sidebar.success(# render as markdown
-        f"Usando: {chosen_model}")
-except Exception as e:
-    st.sidebar.error(f"Erro ao listar modelos: {e}")
-    st.stop()
+# Lógica de seleção automática de modelo (já que funcionou!)
+available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+chosen_model = 'models/gemini-2.5-flash' if 'models/gemini-2.5-flash' in available_models else available_models[0]
+model = genai.GenerativeModel(chosen_model)
 
-# --- NAVEGAÇÃO ---
-menu = st.sidebar.radio("Navegação", ["📊 Dashboard", "🤖 Importar com IA"])
+st.sidebar.success(f"Motor: {chosen_model}")
 
-if menu == "🤖 Importar com IA":
-    st.subheader("Analista IA: Leitura de Relatórios")
-    uploaded_file = st.file_uploader("Suba o arquivo (Excel ou CSV)", type=['xlsx', 'csv'])
+menu = st.sidebar.radio("Navegação", ["📊 Dashboard", "🤖 Importar Relatório"])
+
+if menu == "🤖 Importar Relatório":
+    st.subheader("🤖 Analista IA: Extração Completa")
+    uploaded_file = st.file_uploader("Suba o Excel ou PDF", type=['xlsx', 'csv', 'pdf'])
 
     if uploaded_file:
-        with st.spinner(f"Processando com {chosen_model}..."):
+        with st.spinner("Analisando Ativos, Despesas e Resumo..."):
             try:
+                # Leitura
                 df = pd.read_excel(uploaded_file) if uploaded_file.name.endswith('.xlsx') else pd.read_csv(uploaded_file)
-                df_clean = df.dropna(how='all').dropna(axis=1, how='all')
-                contexto = df_clean.head(100).to_string()
+                contexto = df.dropna(how='all').head(150).to_string() # Pegamos 150 linhas para garantir
                 
-                prompt = f"Retorne APENAS um JSON: [{{'ativo': 'NOME', 'valor_mercado': 0.0, 'tipo_ativo': 'TIPO'}}] com os dados: {contexto}"
+                prompt = f"""
+                Você é um especialista em backoffice de fundos. Analise os dados e extraia:
+                1. ATIVOS: Apenas itens individuais (IGNORE linhas de 'TOTAL', 'PORTFOLIO' ou 'SUBTOTAL').
+                2. DESPESAS: Taxas, impostos e custos operacionais.
+                3. RESUMO: Patrimônio Líquido, Valor da Cota e Total de Despesas.
+
+                Retorne APENAS um JSON:
+                {{
+                  "ativos": [{{ "ativo": "NOME", "valor_mercado": 0.0, "tipo_ativo": "TIPO" }}],
+                  "despesas": [{{ "item": "NOME", "valor": 0.0 }}],
+                  "resumo": {{ "pl": 0.0, "cota": 0.0, "total_despesas": 0.0 }}
+                }}
+                DADOS: {contexto}
+                """
                 
                 response = model.generate_content(prompt)
+                txt = response.text
+                start, end = txt.find('{'), txt.rfind('}') + 1
+                data = json.loads(txt[start:end])
                 
-                start = response.text.find('[')
-                end = response.text.rfind(']') + 1
-                dados = json.loads(response.text[start:end])
-                
-                st.table(dados)
-                
-                if st.button("Confirmar e Salvar"):
+                # --- EXIBIÇÃO ORGANIZADA ---
+                col1, col2, col3 = st.columns(3)
+                col1.metric("Patrimônio Líquido", f"R$ {data['resumo']['pl']:,.2f}")
+                col2.metric("Valor da Cota", f"R$ {data['resumo']['cota']:.6f}")
+                col3.metric("Total Despesas", f"R$ {data['resumo']['total_despesas']:,.2f}", delta_color="inverse")
+
+                tab1, tab2 = st.tabs(["📄 Ativos Identificados", "💸 Despesas"])
+                with tab1:
+                    st.table(data['ativos'])
+                with tab2:
+                    st.table(data['despesas'])
+
+                if st.button("Confirmar e Salvar Tudo"):
                     conn = st.connection("supabase", type=SupabaseConnection)
-                    conn.table("carteira_diaria").insert(dados).execute()
-                    st.success("Salvo!")
+                    # Salva os ativos
+                    conn.table("carteira_diaria").insert(data['ativos']).execute()
+                    st.success("Dados salvos no Supabase!")
+                    
             except Exception as e:
-                st.error(f"Erro: {e}")
+                st.error(f"Erro no processamento: {e}")
+
 else:
-    st.subheader("📊 Posição Consolidada")
-    try:
-        conn = st.connection("supabase", type=SupabaseConnection)
-        res = conn.table("carteira_diaria").select("*").execute()
-        if res.data:
-            st.dataframe(pd.DataFrame(res.data), use_container_width=True)
-    except Exception as e:
-        st.error(f"Erro no banco: {e}")
+    st.subheader("📊 Visão Consolidada")
+    # Aqui depois podemos puxar o histórico do banco
+    st.info("O Dashboard está pronto para receber os dados históricos.")
