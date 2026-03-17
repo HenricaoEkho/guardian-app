@@ -4,84 +4,61 @@ from st_supabase_connection import SupabaseConnection
 import google.generativeai as genai
 import json
 
-# 1. Configuração Inicial
+# 1. Configuração e Título
 st.set_page_config(page_title="Guardian AI", layout="wide")
-st.title("🛡️ Guardian: Inteligência de Dados com IA")
+st.title("🛡️ Guardian: Inteligência de Dados")
 
-# 2. Verificação de Segurança da API Key
+# 2. Puxa a chave dos Secrets
 gemini_key = st.secrets.get("GEMINI_API_KEY")
 
-if not gemini_key or gemini_key == "AIzaSyDoWH6p4-asXzlI4hyzCQ0X_6eaqTQCHhE":
-    st.error("⚠️ Erro: API Key do Gemini não encontrada nos Secrets do Streamlit.")
-    st.info("Va em Settings > Secrets e adicione: GEMINI_API_KEY = 'sua_chave_aqui'")
+if not gemini_key:
+    st.error("⚠️ API Key não encontrada nos Secrets!")
     st.stop()
 
-# 3. Configuração do Modelo
-try:
-    genai.configure(api_key=gemini_key)
-    model = genai.GenerativeModel('gemini-1.5-flash')
-except Exception as e:
-    st.error(f"Erro ao configurar o motor de IA: {e}")
-    st.stop()
+# 3. Configura o motor da IA
+genai.configure(api_key=gemini_key)
+model = genai.GenerativeModel('gemini-1.5-flash')
 
-# 4. Interface de Navegação
-menu = st.sidebar.radio("Navegação", ["Dashboard", "Importar com IA"])
+# 4. Navegação lateral
+menu = st.sidebar.radio("Navegação", ["📊 Dashboard", "🤖 Importar com IA"])
 
-if menu == "Importar com IA":
-    st.subheader("🤖 Analista IA: Leitura de Relatórios")
-    uploaded_file = st.file_uploader("Suba o Excel do Fundo (JGP, Sparta, etc)", type=['xlsx', 'csv'])
+if menu == "🤖 Importar com IA":
+    st.subheader("Analista IA: Leitura de Relatórios")
+    uploaded_file = st.file_uploader("Suba o arquivo (Excel ou CSV)", type=['xlsx', 'csv'])
 
     if uploaded_file:
-        with st.spinner("Limpando e analisando dados..."):
+        with st.spinner("IA processando dados..."):
             try:
-                # Leitura e Limpeza básica para não estourar o limite da IA
+                # Lê e limpa lixo do Excel
                 df = pd.read_excel(uploaded_file) if uploaded_file.name.endswith('.xlsx') else pd.read_csv(uploaded_file)
                 df_clean = df.dropna(how='all').dropna(axis=1, how='all')
                 
-                # Enviamos apenas as primeiras 100 linhas para evitar erro de tamanho
-                contexto_texto = df_clean.head(100).to_string()
+                # Manda só o essencial para a IA (primeiras 100 linhas)
+                contexto = df_clean.head(100).to_string()
                 
-                prompt = f"""
-                Analise estes dados de um relatório de fundo e extraia a CARTEIRA DE ATIVOS.
-                Ignore cabeçalhos. Retorne APENAS um JSON puro no formato:
-                [ {{"ativo": "NOME", "valor_mercado": 0.0, "tipo_ativo": "TIPO"}} ]
-                
-                DADOS:
-                {contexto_texto}
-                """
+                prompt = f"Retorne APENAS um JSON: [{{'ativo': 'NOME', 'valor_mercado': 0.0, 'tipo_ativo': 'TIPO'}}] com os ativos desta lista: {contexto}"
                 
                 response = model.generate_content(prompt)
-                res_text = response.text.strip()
+                txt = response.text
                 
-                # Extração do JSON (caça os colchetes para evitar textos extras da IA)
-                start = res_text.find('[')
-                end = res_text.rfind(']') + 1
+                # Extrai o JSON da resposta da IA
+                start, end = txt.find('['), txt.rfind(']') + 1
+                dados = json.loads(txt[start:end])
                 
-                if start == -1:
-                    st.warning("IA não encontrou dados estruturados. Verifique o arquivo.")
-                    st.write("Resposta da IA:", res_text)
-                else:
-                    dados_finais = json.loads(res_text[start:end])
-                    st.write("✅ Dados identificados:")
-                    st.table(dados_finais)
-
-                    if st.button("Confirmar e Salvar no Banco"):
-                        conn = st.connection("supabase", type=SupabaseConnection)
-                        conn.table("carteira_diaria").insert(dados_finais).execute()
-                        st.success("Dados enviados para o Supabase!")
-
+                st.table(dados)
+                
+                if st.button("Confirmar e Salvar no Banco"):
+                    conn = st.connection("supabase", type=SupabaseConnection)
+                    conn.table("carteira_diaria").insert(dados).execute()
+                    st.success("Salvo com sucesso!")
             except Exception as e:
-                st.error(f"Erro no processamento: {e}")
-
+                st.error(f"Erro: {e}")
 else:
-    # Dashboard Simples
-    st.subheader("📊 Posição em Carteira")
+    st.subheader("Posição Consolidada")
     try:
         conn = st.connection("supabase", type=SupabaseConnection)
         res = conn.table("carteira_diaria").select("*").execute()
         if res.data:
             st.dataframe(pd.DataFrame(res.data), use_container_width=True)
-        else:
-            st.info("Nenhum dado encontrado no banco de dados.")
-    except Exception as e:
-        st.error(f"Erro ao carregar banco: {e}")
+    except:
+        st.info("Aguardando dados...")
