@@ -1,5 +1,5 @@
 streamlit
 st-supabase-connection
+google-generativeai
 pandas
 openpyxl
-google-generativeai
