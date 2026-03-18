@@ -309,4 +309,4 @@ elif menu == "📜 Regulamento":
         conn.table("regulamentos").upsert(payload, on_conflict="fundo_nome").execute()
         st.success("Regulamento ativado!")
         del st.session_state['schema_reg']
-        st.rerun()s
+        st.rerun()
