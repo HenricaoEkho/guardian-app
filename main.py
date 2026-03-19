@@ -10,7 +10,7 @@ from datetime import datetime
 from pypdf import PdfReader
 
 # --- 1. CONFIGURAÇÃO E ESTILO ---
-st.set_page_config(page_title="Guardian Ultra v34", layout="wide", page_icon="🛡️")
+st.set_page_config(page_title="Guardian Ultra v35", layout="wide", page_icon="🛡️")
 
 st.markdown("""
     <style>
@@ -174,20 +174,18 @@ elif menu == "🤖 Importar Carteira":
         if upload_c and st.button("🚀 Processar Arquivo"):
             data_arq = extrair_data_arquivo(upload_c.name)
             with st.spinner("Analisando dicionários de compliance..."):
-                r_vinculo = conn.table("regulamentos").select("categorias_definidas").eq("fundo_nome", fundo_vinculo).execute()
-                # AGORA PASSAMOS O DICIONÁRIO COMPLETO (CHAVE + DESCRIÇÃO)
+                r_vinculo = conn.table("regulamentos").select("categorias_definidas").execute()
                 categorias_dict = r_vinculo.data[0].get('categorias_definidas', {}) if r_vinculo.data else {}
 
                 df = pd.read_excel(upload_c)
                 
+                # PROMPT LIMPO: Sem forçar regras de master/feeder
                 prompt_c = f"""
-                Você é o Diretor de Risco do fundo '{fundo_vinculo}'.
-                
-                PASSO 1: Diga a natureza REAL de mercado de cada ativo (Ex: Fundo Multimercado, LFT, FIDC, Debênture).
-                PASSO 2: As gavetas de compliance e suas definições são: {json.dumps(categorias_dict, ensure_ascii=False)}.
-                - Encaixe o ativo na CHAVE correspondente baseando-se na DESCRIÇÃO.
-                - REGRA DE MASTER/FEEDER: Se o ativo tiver um nome muito similar ao fundo '{fundo_vinculo}', ele é o Fundo Master! Encaixe-o na gaveta principal.
-                - Se realmente não se enquadrar em NENHUMA definição, use 'Desenquadrado'.
+                Você é o Diretor de Risco.
+                PASSO 1: Diga a natureza REAL de mercado de cada ativo (Ex: Fundo Multimercado, LFT, Debênture).
+                PASSO 2: As gavetas de compliance e suas definições exatas são: {json.dumps(categorias_dict, ensure_ascii=False)}.
+                - Avalie a descrição de cada gaveta. Se o ativo bater semanticamente com a descrição, escolha a chave correspondente.
+                - Se realmente não se enquadrar em NENHUMA descrição, use 'Desenquadrado'.
                 
                 JSON: {{'resumo': {{'pl': 0.0, 'cota': 0.0}}, 'ativos': [{{'ativo': 'NOME', 'valor_mercado': 0.0, 'tipo_ativo': 'NATUREZA_REAL', 'gaveta_matematica': 'CHAVE_OU_DESENQUADRADO'}}], 'despesas': [{{'item': 'NOME', 'valor': 0.0}}]}}
                 DADOS: {df.dropna(how='all').head(300).to_string()}
@@ -227,7 +225,6 @@ elif menu == "📉 Mesa de Operações":
             
             aba1, aba2 = st.tabs(["🔀 Lançar Ordem (Maker)", "📋 Fila de Aprovação & Histórico (Checker)"])
             
-            # --- ABA 1: MAKER ---
             with aba1:
                 with st.container(border=True):
                     st.markdown("#### 📝 Lançamento de Ordem")
@@ -273,18 +270,16 @@ elif menu == "📉 Mesa de Operações":
                                                     identificacao_real = res_rfb
                                                     st.info(f"✅ Receita Federal Localizou: **{identificacao_real}**")
                                     
-                                    # BUSCA DICIONÁRIO COMPLETO
                                     r_vinculo = conn.table("regulamentos").select("categorias_definidas").eq("fundo_nome", fundo_ativo).execute()
                                     categorias_dict = r_vinculo.data[0].get('categorias_definidas', {}) if r_vinculo.data else {}
                                     
+                                    # PROMPT LIMPO: Sem hardcodes
                                     prompt_pre = f"""
-                                    Você é o Gestor de Risco do fundo '{fundo_ativo}'. Está avaliando comprar: '{identificacao_real}'.
-                                    
-                                    1. Diga a natureza TÉCNICA real desse ativo (ex: Fundo Multimercado, LFT). SE ler 'FIM', é Multimercado.
+                                    O gestor está boletando: '{identificacao_real}'.
+                                    1. Diga a natureza TÉCNICA real desse ativo (ex: Fundo Multimercado, LFT).
                                     2. O regulamento possui estas gavetas e definições: {json.dumps(categorias_dict, ensure_ascii=False)}.
-                                    - REGRA MASTER: Se o nome do ativo for parecido com o do fundo atual, ele é o Master!
-                                    - Escolha a CHAVE da gaveta que melhor descreve o ativo baseando-se na definição dela. Se nenhuma servir, retorne 'Desenquadrado'.
-                                    
+                                    - Verifique a semântica: se o ativo '{identificacao_real}' corresponder à descrição de alguma gaveta, use a chave dela.
+                                    - Se nenhuma servir, retorne 'Desenquadrado'.
                                     JSON EXATO: {{ "tipo_ativo": "NATUREZA", "gaveta_matematica": "CHAVE_OU_DESENQUADRADO" }}
                                     """
                                     res, motor = chamar_ia_hydra(prompt_pre)
@@ -350,7 +345,7 @@ elif menu == "📉 Mesa de Operações":
                     st.dataframe(df_view_hist, use_container_width=True)
                 else: st.info("Order Book vazio.")
 
-# --- 7. 📜 REGULAMENTO ---
+# --- 7. 📜 REGULAMENTO (A ORIGEM DA INTELIGÊNCIA) ---
 elif menu == "📜 Regulamento":
     st.subheader("📜 Arquiteto de Risco (CVM 175)")
     upload_reg = st.file_uploader("Suba o PDF do Regulamento", type=['pdf'])
@@ -360,11 +355,13 @@ elif menu == "📜 Regulamento":
             try:
                 reader = PdfReader(upload_reg)
                 texto = "".join([p.extract_text() for p in reader.pages[:60]])
+                
+                # PROMPT BLINDADO: Ele pede para a IA capturar o nome do fundo Master se houver
                 prompt_reg = f"""
                 Auditor CVM. 
                 1. Extraia regras de enquadramento PERMANENTES.
-                2. CRIE 'categorias_definidas' EXPLICANDO o que cada gaveta significa (Ex: "Fundo SPX Hornet Master").
-                JSON EXATO: {{ "fundo": "NOME COMPLETO", "cnpj": "CNPJ", "mandato": "Mandato", "regras": [{{ "id": "minimo", "tipo": "minimo_percentual", "limite_min": 0.67, "categorias": ["chave_1"] }}], "categorias_definidas": {{ "chave_1": "Definicao detalhada" }} }}
+                2. CRIE 'categorias_definidas' com DESCRIÇÕES COMPLETAS. Se a regra for investir em um fundo específico (Master), COLOQUE O NOME DO FUNDO MASTER NA DESCRIÇÃO (Ex: "Cotas do fundo SPX Raptor Ekho...").
+                JSON EXATO: {{ "fundo": "NOME COMPLETO", "cnpj": "CNPJ", "mandato": "Mandato", "regras": [{{ "id": "minimo", "tipo": "minimo_percentual", "limite_min": 0.67, "categorias": ["chave_1"] }}], "categorias_definidas": {{ "chave_1": "Definicao detalhada com nomes se houver" }} }}
                 TEXTO: {texto[:35000]}
                 """
                 res, motor = chamar_ia_hydra(prompt_reg)
@@ -382,6 +379,6 @@ elif menu == "📜 Regulamento":
             "regras_json": d.get('regras', []), "categorias_definidas": d.get('categorias_definidas', {})
         }
         conn.table("regulamentos").upsert(payload, on_conflict="fundo_nome").execute()
-        st.success("Motor ativado!")
+        st.success("Motor ativado! Sem hardcodes.")
         del st.session_state['schema_reg']
         st.rerun()
