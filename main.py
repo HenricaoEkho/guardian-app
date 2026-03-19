@@ -11,7 +11,7 @@ from datetime import datetime
 from pypdf import PdfReader
 
 # --- 1. CONFIGURAÇÃO E ESTILO ---
-st.set_page_config(page_title="Guardian Ultra v37", layout="wide", page_icon="🛡️")
+st.set_page_config(page_title="Guardian Ultra v38", layout="wide", page_icon="🛡️")
 
 st.markdown("""
     <style>
@@ -71,7 +71,6 @@ def obter_token_anbima():
 
 def buscar_dados_internet(termo_busca):
     dossie = {"termo": termo_busca, "fonte": "Nenhuma Base Oficial", "dados": "O ativo não foi encontrado na internet. Classifique pelo nome."}
-    
     if re.search(r'\d{4}', termo_busca):
         cnpj_limpo = re.sub(r'[^0-9]', '', termo_busca)
         if len(cnpj_limpo) == 14:
@@ -99,7 +98,6 @@ def buscar_dados_internet(termo_busca):
                     dossie["dados"] = f"Razão Social: {dados.get('razao_social', termo_busca)} | CNAE: {dados.get('cnae_fiscal_descricao', '')}"
                     return dossie
             except: pass
-            
     else:
         try:
             ticker_str = termo_busca.upper().strip()
@@ -189,7 +187,7 @@ if menu == "📊 Dashboard":
                         st.dataframe(df_d_view, use_container_width=True)
         else: st.warning("Nenhuma carteira importada para este fundo.")
 
-# --- 5. 🤖 IMPORTAR CARTEIRA ---
+# --- 5. 🤖 IMPORTAR CARTEIRA (RACIOCÍNIO EM CADEIA) ---
 elif menu == "🤖 Importar Carteira":
     st.subheader("📥 Carga Inicial e Classificação")
     if not lista_regulamentos:
@@ -200,21 +198,24 @@ elif menu == "🤖 Importar Carteira":
         
         if upload_c and st.button("🚀 Processar Arquivo"):
             data_arq = extrair_data_arquivo(upload_c.name)
-            with st.spinner("Analisando dicionários de compliance..."):
+            with st.spinner("Motor de IA executando Raciocínio Lógico (Chain of Thought)..."):
                 r_vinculo = conn.table("regulamentos").select("categorias_definidas").eq("fundo_nome", fundo_vinculo).execute()
                 categorias_dict = r_vinculo.data[0].get('categorias_definidas', {}) if r_vinculo.data else {}
 
                 df = pd.read_excel(upload_c)
                 
+                # PROMPT CHAIN OF THOUGHT: Obriga a IA a se explicar
                 prompt_c = f"""
-                Você é o Diretor de Risco.
-                PASSO 1: Diga a natureza REAL de mercado de cada ativo (Ex: Fundo Multimercado, LFT, FIDC).
-                PASSO 2: As gavetas de compliance e suas definições exatas são: {json.dumps(categorias_dict, ensure_ascii=False)}.
-                - Avalie a descrição de cada gaveta. Se o ativo bater semanticamente com a descrição, escolha a chave correspondente.
-                - ATENÇÃO À LIQUIDEZ: Tesouro Selic, LFT, Fundos DI ou Operações Compromissadas DEVEM ir para a gaveta de 'caixa' ou 'liquidez' se ela existir.
-                - Se realmente não se enquadrar em NENHUMA descrição, use 'Desenquadrado'.
+                Você é um Auditor de Risco Implacável da CVM. Sua função é auditar a carteira.
                 
-                JSON: {{'resumo': {{'pl': 0.0, 'cota': 0.0}}, 'ativos': [{{'ativo': 'NOME', 'valor_mercado': 0.0, 'tipo_ativo': 'NATUREZA_REAL', 'gaveta_matematica': 'CHAVE_OU_DESENQUADRADO'}}], 'despesas': [{{'item': 'NOME', 'valor': 0.0}}]}}
+                As gavetas de compliance OBRIGATÓRIAS do fundo são: {json.dumps(categorias_dict, ensure_ascii=False)}.
+                
+                METODOLOGIA DE ANÁLISE (CUMPRA ESTA ORDEM):
+                1. 'tipo_ativo': Defina a natureza técnica real do ativo no Brasil (ex: Fundo Multimercado, LFT, FIDC, CRI).
+                2. 'raciocinio': Explique em 1 frase se o 'tipo_ativo' atende EXATAMENTE a descrição de alguma das gavetas acima.
+                3. 'gaveta_matematica': Baseado no seu raciocínio, preencha a chave exata. Se não houver encaixe perfeito, escreva ESTRITAMENTE 'Desenquadrado'. Não force encaixes!
+                
+                JSON OBRIGATÓRIO: {{'resumo': {{'pl': 0.0, 'cota': 0.0}}, 'ativos': [{{'ativo': 'NOME', 'valor_mercado': 0.0, 'tipo_ativo': 'NATUREZA', 'raciocinio': 'Sua explicacao logica', 'gaveta_matematica': 'CHAVE_OU_DESENQUADRADO'}}], 'despesas': [{{'item': 'NOME', 'valor': 0.0}}]}}
                 DADOS: {df.dropna(how='all').head(300).to_string()}
                 """
                 res, motor = chamar_ia_hydra(prompt_c)
@@ -224,14 +225,18 @@ elif menu == "🤖 Importar Carteira":
                     for d in data.get('despesas', []): d['valor'] = -abs(float(d.get('valor', 0)))
                     st.session_state['temp_c'] = {'data': data, 'data_arq': data_arq, 'fundo': fundo_vinculo}
                     st.success("Análise de Risco Concluída!")
-                    st.dataframe(pd.DataFrame(data.get('ativos', [])))
+                    # Mostramos o raciocínio na tela pra você auditar a IA
+                    st.dataframe(pd.DataFrame(data.get('ativos', []))[['ativo', 'valor_mercado', 'tipo_ativo', 'raciocinio', 'gaveta_matematica']])
                 else: st.error("Erro na resposta da IA.")
 
         if 'temp_c' in st.session_state and st.button("💾 Gravar no Database"):
             tc = st.session_state['temp_c']
             fn, dt, d = tc['fundo'], tc['data_arq'], tc['data']
-            for a in d.get('ativos', []): a['fundo_nome'] = fn; a['data'] = dt
+            for a in d.get('ativos', []): 
+                a['fundo_nome'] = fn; a['data'] = dt
+                a.pop('raciocinio', None) # Removemos a coluna raciocinio antes de salvar no SQL para não dar erro
             for ds in d.get('despesas', []): ds['fundo_nome'] = fn; ds['data'] = dt
+            
             if d.get('ativos'): conn.table("carteira_diaria").insert(d['ativos']).execute()
             if d.get('despesas'): conn.table("despesas_diarias").insert(d['despesas']).execute()
             st.success("Carteira gravada!")
@@ -265,7 +270,9 @@ elif menu == "📉 Mesa de Operações":
                         
                         if "Existente" in tipo_ativo_boleta:
                             ativo_mov = col_a.selectbox("Ativo Alvo", df_ativos['ativo'].tolist() if not df_ativos.empty else [])
-                            if st.form_submit_button("Gerar Boleta Pendente"):
+                            enviar_ordem = st.form_submit_button("Gerar Boleta Pendente")
+                            
+                            if enviar_ordem:
                                 linha_ativo = df_ativos[df_ativos['ativo'] == ativo_mov].iloc[0]
                                 payload = {
                                     "fundo_nome": fundo_ativo, "data": data_sel, "tipo": tipo_mov, 
@@ -287,23 +294,24 @@ elif menu == "📉 Mesa de Operações":
                                     r_vinculo = conn.table("regulamentos").select("categorias_definidas").eq("fundo_nome", fundo_ativo).execute()
                                     categorias_dict = r_vinculo.data[0].get('categorias_definidas', {}) if r_vinculo.data else {}
                                     
+                                    # PROMPT CHAIN OF THOUGHT PRÉ-TRADE
                                     prompt_pre = f"""
-                                    Você é o Gestor de Risco do fundo '{fundo_ativo}'.
-                                    O ativo pesquisado foi '{ativo_mov}'. Dossiê: "{dossie['dados']}"
+                                    O gestor quer comprar: '{ativo_mov}'. Dossiê Web: "{dossie['dados']}"
+                                    As gavetas permitidas pelo fundo são: {json.dumps(categorias_dict, ensure_ascii=False)}.
                                     
                                     SUA TAREFA:
-                                    1. Diga a natureza TÉCNICA (ex: Fundo Multimercado, LFT).
-                                    2. O regulamento possui estas gavetas e definições: {json.dumps(categorias_dict, ensure_ascii=False)}.
-                                    - Verifique a semântica: A descrição de alguma gaveta bate com os dados do Dossiê? Use a chave dela.
-                                    - Se for Título Público/Tesouro, procure a gaveta de Liquidez ou Caixa.
-                                    - Se não tiver relação direta, retorne 'Desenquadrado'.
-                                    JSON EXATO: {{ "tipo_ativo": "NATUREZA", "gaveta_matematica": "CHAVE_OU_DESENQUADRADO" }}
+                                    1. 'tipo_ativo': Diga a natureza TÉCNICA com base no dossiê.
+                                    2. 'raciocinio': Pense passo a passo. A natureza do ativo corresponde PERFEITAMENTE a alguma descrição das gavetas?
+                                    3. 'gaveta_matematica': Se a resposta acima for sim, coloque a chave. Se não for perfeito, retorne 'Desenquadrado'.
+                                    
+                                    JSON EXATO: {{ "tipo_ativo": "NATUREZA", "raciocinio": "Sua explicacao", "gaveta_matematica": "CHAVE_OU_DESENQUADRADO" }}
                                     """
                                     res, motor = chamar_ia_hydra(prompt_pre)
                                     classif = extrair_json_seguro(res.text)
                                     
                                     tipo_ia = classif.get('tipo_ativo', 'Desconhecido')
                                     gaveta_ia = classif.get('gaveta_matematica', 'Desenquadrado')
+                                    raciocinio_ia = classif.get('raciocinio', '')
                                     
                                     payload = {
                                         "fundo_nome": fundo_ativo, "data": data_sel, "tipo": "Compra", 
@@ -314,7 +322,7 @@ elif menu == "📉 Mesa de Operações":
                                     conn.table("movimentacoes_ativo").insert(payload).execute()
                                     
                                     cor = "red" if gaveta_ia == 'Desenquadrado' else "green"
-                                    st.info(f"🧠 **Diagnóstico IA:** Natureza: **{tipo_ia}**. Gaveta: :{cor}[**{gaveta_ia}**].")
+                                    st.info(f"🧠 **Diagnóstico IA:** Natureza: **{tipo_ia}**. Gaveta: :{cor}[**{gaveta_ia}**].\n\n*Justificativa da IA: {raciocinio_ia}*")
                                     st.success("Ordem aguardando aprovação no Checker.")
 
             with aba2:
@@ -363,42 +371,28 @@ elif menu == "📉 Mesa de Operações":
                 else: st.info("Order Book vazio.")
         else: st.warning("Importe a carteira base primeiro.")
 
-# --- 7. 📜 REGULAMENTO (O AUDITOR CVM 175 SUPREMO) ---
+# --- 7. 📜 REGULAMENTO (O BLINDADOR DE ALUCINAÇÕES) ---
 elif menu == "📜 Regulamento":
     st.subheader("📜 Arquiteto de Risco (CVM 175)")
     upload_reg = st.file_uploader("Suba o PDF do Regulamento", type=['pdf'])
     
     if upload_reg and st.button("🚀 Mapear Cérebro de Compliance"):
-        with st.spinner("Motor IA lendo e mapeando TODAS as diretrizes de risco..."):
+        with st.spinner("Análise Profunda ativada..."):
             try:
                 reader = PdfReader(upload_reg)
                 texto = "".join([p.extract_text() for p in reader.pages[:60]])
                 
-                # NOVO PROMPT: OBRIGA A CRIAR A GAVETA DE LIQUIDEZ E A DETALHAR O MASTER
+                # PROMPT BLINDADO: Proibido inventar regra baseada em fator de risco!
                 prompt_reg = f"""
-                Você é um Auditor Sênior da CVM especialista em estruturação de fundos (Resolução CVM 175).
-                Sua missão é extrair TODAS as regras de enquadramento do regulamento fornecido, sem deixar NADA de fora.
-
-                DIRETRIZES VITAIS:
-                1. MAPEAR OBRIGATORIAMENTE O CAIXA/LIQUIDEZ: Todo fundo pode investir uma parcela em ativos de liquidez (Tesouro Selic, Títulos Públicos, Fundos DI, Operações Compromissadas). VOCÊ DEVE CRIAR UMA GAVETA PARA ISSO (Ex: 'caixa_liquidez'). Se o regulamento não der limite, assuma tipo 'maximo_percentual' com limite 1.0 (100%) ou limite complementar ao mandato principal (ex: se o master pede 95%, o caixa é 5% = 0.05).
-                2. FUNDOS MASTER/FEEDER (FIC): Se for um FIC, crie a regra de limite no Master e OBRIGATORIAMENTE cite o nome do Fundo Master na descrição de 'categorias_definidas'.
-                3. TODOS OS ATIVOS PERMITIDOS: Crie gavetas claras (com chaves curtas e descrições longas e detalhadas) para todos os ativos listados na Política de Investimento.
-
-                JSON EXATO: 
-                {{ 
-                  "fundo": "NOME COMPLETO", 
-                  "cnpj": "CNPJ", 
-                  "mandato": "Mandato", 
-                  "regras": [
-                    {{ "id": "regra_master", "tipo": "minimo_percentual", "limite_min": 0.95, "categorias": ["cota_master"] }},
-                    {{ "id": "regra_caixa", "tipo": "maximo_percentual", "limite_max": 1.0, "categorias": ["caixa_liquidez"] }}
-                  ], 
-                  "categorias_definidas": {{ 
-                    "cota_master": "Cotas do fundo master SPX Raptor Ekho...", 
-                    "caixa_liquidez": "Títulos públicos federais, operações compromissadas e cotas de fundos DI para gestão de caixa" 
-                  }} 
-                }}
+                Auditor CVM. Sua missão é extrair as regras de enquadramento da POLÍTICA DE INVESTIMENTO.
                 
+                LIMITES RESTRITOS:
+                1. EXTRAIA APENAS O QUE ESTÁ ESCRITO NA SEÇÃO DE POLÍTICA DE INVESTIMENTO.
+                2. É ESTRITAMENTE PROIBIDO criar limites baseados na seção de "Fatores de Risco". Se o regulamento não possui limite expresso de 'crédito privado', NÃO CRIE ESSA REGRA.
+                3. OBRIGATÓRIO: Crie uma regra/gaveta para "Caixa e Liquidez" (Tesouro Selic, Títulos Públicos, Operações Compromissadas) com limite de 100% (1.0), pois todo fundo precisa ter caixa.
+                4. CRIE 'categorias_definidas' EXPLICANDO o que a gaveta significa.
+                
+                JSON EXATO: {{ "fundo": "NOME COMPLETO", "cnpj": "CNPJ", "mandato": "Mandato", "regras": [{{ "id": "minimo_estrategia", "tipo": "minimo_percentual", "limite_min": 0.67, "categorias": ["chave_1"] }}], "categorias_definidas": {{ "chave_1": "Definicao detalhada" }} }}
                 TEXTO: {texto[:35000]}
                 """
                 res, motor = chamar_ia_hydra(prompt_reg)
@@ -406,7 +400,7 @@ elif menu == "📜 Regulamento":
                 if data:
                     st.session_state['schema_reg'] = data
                     st.json(data)
-                else: st.error("Erro na extração. A IA retornou um formato inválido.")
+                else: st.error("Erro na extração.")
             except Exception as e: st.error(f"Erro: {e}")
 
     if 'schema_reg' in st.session_state and st.button("💾 Ativar Compliance"):
@@ -416,6 +410,6 @@ elif menu == "📜 Regulamento":
             "regras_json": d.get('regras', []), "categorias_definidas": d.get('categorias_definidas', {})
         }
         conn.table("regulamentos").upsert(payload, on_conflict="fundo_nome").execute()
-        st.success("Motor de Compliance ativado com sucesso!")
+        st.success("Motor ativado!")
         del st.session_state['schema_reg']
         st.rerun()
