@@ -11,7 +11,7 @@ from datetime import datetime
 from pypdf import PdfReader
 
 # --- 1. CONFIGURAÇÃO E ESTILO ---
-st.set_page_config(page_title="Guardian Ultra v36", layout="wide", page_icon="🛡️")
+st.set_page_config(page_title="Guardian Ultra v37", layout="wide", page_icon="🛡️")
 
 st.markdown("""
     <style>
@@ -72,11 +72,9 @@ def obter_token_anbima():
 def buscar_dados_internet(termo_busca):
     dossie = {"termo": termo_busca, "fonte": "Nenhuma Base Oficial", "dados": "O ativo não foi encontrado na internet. Classifique pelo nome."}
     
-    # 1. É CNPJ?
     if re.search(r'\d{4}', termo_busca):
         cnpj_limpo = re.sub(r'[^0-9]', '', termo_busca)
         if len(cnpj_limpo) == 14:
-            # Tenta ANBIMA
             token = obter_token_anbima()
             if token:
                 url_anbima = f"https://api.anbima.com.br/feed/fundos/v2/fundos/{cnpj_limpo}"
@@ -92,7 +90,6 @@ def buscar_dados_internet(termo_busca):
                         return dossie
                 except: pass
             
-            # Se ANBIMA falhar, tenta Receita Federal
             url_rfb = f"https://brasilapi.com.br/api/cnpj/v1/{cnpj_limpo}"
             try:
                 resp = requests.get(url_rfb, timeout=5)
@@ -103,7 +100,6 @@ def buscar_dados_internet(termo_busca):
                     return dossie
             except: pass
             
-    # 2. É TICKER DA BOLSA? (Ex: VALE3, BOVA11)
     else:
         try:
             ticker_str = termo_busca.upper().strip()
@@ -118,7 +114,6 @@ def buscar_dados_internet(termo_busca):
                 dossie["dados"] = f"Ativo: {nome} | Tipo Mercado: {tipo} | Setor: {setor}"
                 return dossie
         except: pass
-
     return dossie
 
 conn = st.connection("supabase", type=SupabaseConnection)
@@ -180,7 +175,11 @@ if menu == "📊 Dashboard":
                 df_view = df_c[['ativo', 'valor_mercado', 'tipo_ativo', 'gaveta_matematica']].copy()
                 df_view['% PL'] = (df_view['valor_mercado'] / pl_liquido * 100).apply(lambda x: f"{x:.2f}%")
                 df_view['valor_mercado'] = df_view['valor_mercado'].apply(format_br)
-                st.dataframe(df_view[['ativo', 'valor_mercado', '% PL', 'tipo_ativo', 'gaveta_matematica']], use_container_width=True)
+                
+                def colorir_desenquadrado(val):
+                    return f'color: #ff4b4b; font-weight: bold;' if val == 'Desenquadrado' else ''
+                
+                st.dataframe(df_view[['ativo', 'valor_mercado', '% PL', 'tipo_ativo', 'gaveta_matematica']].style.map(colorir_desenquadrado, subset=['gaveta_matematica']), use_container_width=True)
                 
                 if not df_d.empty:
                     with st.expander("💸 Visualizar Despesas"):
@@ -212,6 +211,7 @@ elif menu == "🤖 Importar Carteira":
                 PASSO 1: Diga a natureza REAL de mercado de cada ativo (Ex: Fundo Multimercado, LFT, FIDC).
                 PASSO 2: As gavetas de compliance e suas definições exatas são: {json.dumps(categorias_dict, ensure_ascii=False)}.
                 - Avalie a descrição de cada gaveta. Se o ativo bater semanticamente com a descrição, escolha a chave correspondente.
+                - ATENÇÃO À LIQUIDEZ: Tesouro Selic, LFT, Fundos DI ou Operações Compromissadas DEVEM ir para a gaveta de 'caixa' ou 'liquidez' se ela existir.
                 - Se realmente não se enquadrar em NENHUMA descrição, use 'Desenquadrado'.
                 
                 JSON: {{'resumo': {{'pl': 0.0, 'cota': 0.0}}, 'ativos': [{{'ativo': 'NOME', 'valor_mercado': 0.0, 'tipo_ativo': 'NATUREZA_REAL', 'gaveta_matematica': 'CHAVE_OU_DESENQUADRADO'}}], 'despesas': [{{'item': 'NOME', 'valor': 0.0}}]}}
@@ -238,7 +238,7 @@ elif menu == "🤖 Importar Carteira":
             del st.session_state['temp_c']
             st.rerun()
 
-# --- 6. 📉 MESA DE OPERAÇÕES (AGORA COM O ORÁCULO DA WEB) ---
+# --- 6. 📉 MESA DE OPERAÇÕES ---
 elif menu == "📉 Mesa de Operações":
     st.subheader(f"📉 OMS (Order Management System): {fundo_ativo}")
     if fundo_ativo != "Nenhum":
@@ -280,34 +280,23 @@ elif menu == "📉 Mesa de Operações":
                             enviar_ordem = st.form_submit_button("Consultar Oráculo da Web e Analisar Risco")
                             
                             if enviar_ordem and ativo_mov:
-                                with st.spinner("Buscando dados em tempo real na ANBIMA, Receita Federal e B3..."):
-                                    # 1. O Python navega na internet e monta o dossiê
+                                with st.spinner("Buscando dados em tempo real..."):
                                     dossie = buscar_dados_internet(ativo_mov)
-                                    
-                                    # Mostra o resultado da pesquisa na tela pra você ver
-                                    st.markdown(f"""
-                                    <div class="dossie-box">
-                                        <b>🌐 Dossiê da Internet:</b><br>
-                                        Fonte: <i>{dossie['fonte']}</i><br>
-                                        Dados Encontrados: <b>{dossie['dados']}</b>
-                                    </div>
-                                    """, unsafe_allow_html=True)
+                                    st.markdown(f"""<div class="dossie-box"><b>🌐 Dossiê da Internet:</b><br>Fonte: <i>{dossie['fonte']}</i><br>Dados: <b>{dossie['dados']}</b></div>""", unsafe_allow_html=True)
                                     
                                     r_vinculo = conn.table("regulamentos").select("categorias_definidas").eq("fundo_nome", fundo_ativo).execute()
                                     categorias_dict = r_vinculo.data[0].get('categorias_definidas', {}) if r_vinculo.data else {}
                                     
-                                    # 2. Esfrega o dossiê na cara da IA
                                     prompt_pre = f"""
                                     Você é o Gestor de Risco do fundo '{fundo_ativo}'.
-                                    O ativo que o operador digitou foi '{ativo_mov}'. Nós pesquisamos na internet e encontramos O SEGUINTE DOSSIÊ OFICIAL:
-                                    "{dossie['dados']}"
+                                    O ativo pesquisado foi '{ativo_mov}'. Dossiê: "{dossie['dados']}"
                                     
                                     SUA TAREFA:
-                                    1. Diga a natureza TÉCNICA desse ativo baseando-se EXCLUSIVAMENTE no Dossiê acima.
+                                    1. Diga a natureza TÉCNICA (ex: Fundo Multimercado, LFT).
                                     2. O regulamento possui estas gavetas e definições: {json.dumps(categorias_dict, ensure_ascii=False)}.
-                                    - Verifique a semântica: A descrição de alguma gaveta bate com os dados do Dossiê? Se sim, use a chave dela.
+                                    - Verifique a semântica: A descrição de alguma gaveta bate com os dados do Dossiê? Use a chave dela.
+                                    - Se for Título Público/Tesouro, procure a gaveta de Liquidez ou Caixa.
                                     - Se não tiver relação direta, retorne 'Desenquadrado'.
-                                    
                                     JSON EXATO: {{ "tipo_ativo": "NATUREZA", "gaveta_matematica": "CHAVE_OU_DESENQUADRADO" }}
                                     """
                                     res, motor = chamar_ia_hydra(prompt_pre)
@@ -325,7 +314,7 @@ elif menu == "📉 Mesa de Operações":
                                     conn.table("movimentacoes_ativo").insert(payload).execute()
                                     
                                     cor = "red" if gaveta_ia == 'Desenquadrado' else "green"
-                                    st.info(f"🧠 **Diagnóstico IA (Pós-Internet):** Natureza: **{tipo_ia}**. Gaveta: :{cor}[**{gaveta_ia}**].")
+                                    st.info(f"🧠 **Diagnóstico IA:** Natureza: **{tipo_ia}**. Gaveta: :{cor}[**{gaveta_ia}**].")
                                     st.success("Ordem aguardando aprovação no Checker.")
 
             with aba2:
@@ -372,22 +361,44 @@ elif menu == "📉 Mesa de Operações":
                     df_view_hist['valor'] = df_view_hist['valor'].apply(format_br)
                     st.dataframe(df_view_hist, use_container_width=True)
                 else: st.info("Order Book vazio.")
+        else: st.warning("Importe a carteira base primeiro.")
 
-# --- 7. 📜 REGULAMENTO ---
+# --- 7. 📜 REGULAMENTO (O AUDITOR CVM 175 SUPREMO) ---
 elif menu == "📜 Regulamento":
     st.subheader("📜 Arquiteto de Risco (CVM 175)")
     upload_reg = st.file_uploader("Suba o PDF do Regulamento", type=['pdf'])
     
     if upload_reg and st.button("🚀 Mapear Cérebro de Compliance"):
-        with st.spinner("Análise Profunda ativada..."):
+        with st.spinner("Motor IA lendo e mapeando TODAS as diretrizes de risco..."):
             try:
                 reader = PdfReader(upload_reg)
                 texto = "".join([p.extract_text() for p in reader.pages[:60]])
+                
+                # NOVO PROMPT: OBRIGA A CRIAR A GAVETA DE LIQUIDEZ E A DETALHAR O MASTER
                 prompt_reg = f"""
-                Auditor CVM. 
-                1. Extraia regras de enquadramento PERMANENTES.
-                2. CRIE 'categorias_definidas' EXPLICANDO o que cada gaveta significa (Ex: Se for um FIC que investe em um Master, coloque o NOME EXATO do fundo Master na descrição).
-                JSON EXATO: {{ "fundo": "NOME COMPLETO", "cnpj": "CNPJ", "mandato": "Mandato", "regras": [{{ "id": "minimo", "tipo": "minimo_percentual", "limite_min": 0.67, "categorias": ["chave_1"] }}], "categorias_definidas": {{ "chave_1": "Definicao detalhada com nomes se houver" }} }}
+                Você é um Auditor Sênior da CVM especialista em estruturação de fundos (Resolução CVM 175).
+                Sua missão é extrair TODAS as regras de enquadramento do regulamento fornecido, sem deixar NADA de fora.
+
+                DIRETRIZES VITAIS:
+                1. MAPEAR OBRIGATORIAMENTE O CAIXA/LIQUIDEZ: Todo fundo pode investir uma parcela em ativos de liquidez (Tesouro Selic, Títulos Públicos, Fundos DI, Operações Compromissadas). VOCÊ DEVE CRIAR UMA GAVETA PARA ISSO (Ex: 'caixa_liquidez'). Se o regulamento não der limite, assuma tipo 'maximo_percentual' com limite 1.0 (100%) ou limite complementar ao mandato principal (ex: se o master pede 95%, o caixa é 5% = 0.05).
+                2. FUNDOS MASTER/FEEDER (FIC): Se for um FIC, crie a regra de limite no Master e OBRIGATORIAMENTE cite o nome do Fundo Master na descrição de 'categorias_definidas'.
+                3. TODOS OS ATIVOS PERMITIDOS: Crie gavetas claras (com chaves curtas e descrições longas e detalhadas) para todos os ativos listados na Política de Investimento.
+
+                JSON EXATO: 
+                {{ 
+                  "fundo": "NOME COMPLETO", 
+                  "cnpj": "CNPJ", 
+                  "mandato": "Mandato", 
+                  "regras": [
+                    {{ "id": "regra_master", "tipo": "minimo_percentual", "limite_min": 0.95, "categorias": ["cota_master"] }},
+                    {{ "id": "regra_caixa", "tipo": "maximo_percentual", "limite_max": 1.0, "categorias": ["caixa_liquidez"] }}
+                  ], 
+                  "categorias_definidas": {{ 
+                    "cota_master": "Cotas do fundo master SPX Raptor Ekho...", 
+                    "caixa_liquidez": "Títulos públicos federais, operações compromissadas e cotas de fundos DI para gestão de caixa" 
+                  }} 
+                }}
+                
                 TEXTO: {texto[:35000]}
                 """
                 res, motor = chamar_ia_hydra(prompt_reg)
@@ -395,7 +406,7 @@ elif menu == "📜 Regulamento":
                 if data:
                     st.session_state['schema_reg'] = data
                     st.json(data)
-                else: st.error("Erro na extração.")
+                else: st.error("Erro na extração. A IA retornou um formato inválido.")
             except Exception as e: st.error(f"Erro: {e}")
 
     if 'schema_reg' in st.session_state and st.button("💾 Ativar Compliance"):
@@ -405,6 +416,6 @@ elif menu == "📜 Regulamento":
             "regras_json": d.get('regras', []), "categorias_definidas": d.get('categorias_definidas', {})
         }
         conn.table("regulamentos").upsert(payload, on_conflict="fundo_nome").execute()
-        st.success("Motor ativado!")
+        st.success("Motor de Compliance ativado com sucesso!")
         del st.session_state['schema_reg']
         st.rerun()
