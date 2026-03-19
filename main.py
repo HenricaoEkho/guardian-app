@@ -10,7 +10,7 @@ from datetime import datetime
 from pypdf import PdfReader
 
 # --- 1. CONFIGURAÇÃO E ESTILO ---
-st.set_page_config(page_title="Guardian Ultra v31", layout="wide", page_icon="🛡️")
+st.set_page_config(page_title="Guardian Ultra v32", layout="wide", page_icon="🛡️")
 
 st.markdown("""
     <style>
@@ -37,7 +37,7 @@ def extrair_json_seguro(texto_ia):
     except:
         return {}
 
-# --- 2. INTEGRAÇÃO ANBIMA & GEMINI ---
+# --- 2. INTEGRAÇÃO APIs E IA ---
 gemini_key = st.secrets.get("GEMINI_API_KEY")
 anbima_client_id = st.secrets.get("ANBIMA_CLIENT_ID")
 anbima_client_secret = st.secrets.get("ANBIMA_CLIENT_SECRET")
@@ -53,42 +53,45 @@ def chamar_ia_hydra(prompt):
         except: continue
     raise Exception("Modelos IA indisponíveis no momento.")
 
-# Função para Gerar Token da ANBIMA
+# API ANBIMA
 def obter_token_anbima():
     if not anbima_client_id or not anbima_client_secret: return None
     url = "https://api.anbima.com.br/oauth/access-token"
     auth_str = f"{anbima_client_id}:{anbima_client_secret}"
     b64_auth_str = base64.b64encode(auth_str.encode()).decode()
-    headers = {
-        "Authorization": f"Basic {b64_auth_str}",
-        "Content-Type": "application/json"
-    }
+    headers = {"Authorization": f"Basic {b64_auth_str}", "Content-Type": "application/json"}
     payload = {"grant_type": "client_credentials"}
     try:
-        resp = requests.post(url, headers=headers, json=payload)
-        if resp.status_code == 200:
-            return resp.json().get("access_token")
+        resp = requests.post(url, headers=headers, json=payload, timeout=5)
+        if resp.status_code == 200: return resp.json().get("access_token")
     except: return None
     return None
 
-# Função para Buscar Fundo na ANBIMA via CNPJ
 def consultar_fundo_anbima(cnpj):
     token = obter_token_anbima()
     if not token: return None
     cnpj_limpo = re.sub(r'[^0-9]', '', cnpj)
     url = f"https://api.anbima.com.br/feed/fundos/v2/fundos/{cnpj_limpo}"
-    headers = {
-        "client_id": anbima_client_id,
-        "access_token": token
-    }
+    headers = {"client_id": anbima_client_id, "access_token": token}
     try:
-        resp = requests.get(url, headers=headers)
+        resp = requests.get(url, headers=headers, timeout=5)
         if resp.status_code == 200:
             dados = resp.json()
-            # A ANBIMA retorna muita coisa. Vamos pegar a Denominação Social e a Classe ANBIMA
             nome = dados.get('informacoes_cadastrais', {}).get('denominacao_social', cnpj)
-            classe = dados.get('informacoes_cadastrais', {}).get('classe_anbima', 'Fundo de Investimento')
-            return f"{nome} (Classe ANBIMA: {classe})"
+            classe = dados.get('informacoes_cadastrais', {}).get('classe_anbima', 'Fundo')
+            return f"{nome} ({classe})"
+    except: return None
+    return None
+
+# API DA RECEITA FEDERAL (O FALLBACK INFALÍVEL)
+def consultar_brasil_api(cnpj):
+    cnpj_limpo = re.sub(r'[^0-9]', '', cnpj)
+    url = f"https://brasilapi.com.br/api/cnpj/v1/{cnpj_limpo}"
+    try:
+        resp = requests.get(url, timeout=5)
+        if resp.status_code == 200:
+            dados = resp.json()
+            return dados.get("razao_social", cnpj)
     except: return None
     return None
 
@@ -180,6 +183,7 @@ elif menu == "🤖 Importar Carteira":
                 
                 prompt_c = f"""
                 Você é um Analista de Dados da ANBIMA e Risco de Compliance.
+                Acesse a carteira de investimentos enviada.
                 PASSO 1: Identifique a natureza REAL de cada ativo (Ex: Fundo Multimercado, LFT, FIDC). 
                 PASSO 2: O regulamento SÓ ACEITA as seguintes chaves: {chaves_permitidas}.
                 SE o ativo não se enquadrar PERFEITAMENTE, a 'gaveta_matematica' OBRIGATORIAMENTE deve ser 'Desenquadrado'.
@@ -208,7 +212,7 @@ elif menu == "🤖 Importar Carteira":
             del st.session_state['temp_c']
             st.rerun()
 
-# --- 6. 📉 MESA DE OPERAÇÕES (NOVO ATIVO VIA ANBIMA) ---
+# --- 6. 📉 MESA DE OPERAÇÕES (O NOVO MOTOR ANTI-ALUCINAÇÃO) ---
 elif menu == "📉 Mesa de Operações":
     st.subheader(f"📉 OMS (Order Management System): {fundo_ativo}")
     if fundo_ativo != "Nenhum":
@@ -226,7 +230,7 @@ elif menu == "📉 Mesa de Operações":
             with aba1:
                 with st.container(border=True):
                     st.markdown("#### 📝 Lançamento de Ordem")
-                    tipo_ativo_boleta = st.radio("Selecione o tipo de ordem:", ["Ativo Existente na Carteira", "Novo Ativo (Pré-Trade c/ Consulta ANBIMA)"], horizontal=True)
+                    tipo_ativo_boleta = st.radio("Selecione o tipo de ordem:", ["Ativo Existente na Carteira", "Novo Ativo (Pré-Trade c/ Consulta)"], horizontal=True)
                     st.divider()
                     
                     with st.form("form_boleta_oms"):
@@ -249,46 +253,56 @@ elif menu == "📉 Mesa de Operações":
                                 conn.table("movimentacoes_ativo").insert(payload).execute()
                                 st.success(f"Ordem de {tipo_mov} de {ativo_mov} enviada para o Checker.")
                         else:
-                            ativo_mov = col_a.text_input("Ticker ou CNPJ do Ativo (Ex: 51.556.428/0001-56)")
-                            enviar_ordem = st.form_submit_button("Consultar ANBIMA e Gerar Boleta")
+                            ativo_mov = col_a.text_input("Ticker ou CNPJ (Ex: 51.556.428/0001-56)")
+                            enviar_ordem = st.form_submit_button("Consultar e Analisar Risco")
                             
                             if enviar_ordem and ativo_mov:
-                                with st.spinner("Consultando bases oficiais ANBIMA e cruzando com o Compliance..."):
-                                    # 1. Bate na API da ANBIMA primeiro
-                                    identificacao_anbima = ativo_mov
-                                    if re.search(r'\d', ativo_mov): # Se tiver número, assume que pode ser CNPJ
-                                        resultado_api = consultar_fundo_anbima(ativo_mov)
-                                        if resultado_api:
-                                            identificacao_anbima = resultado_api
-                                            st.info(f"✅ Encontrado na ANBIMA: **{identificacao_anbima}**")
-                                        else:
-                                            st.warning("⚠️ Ativo não localizado via API ANBIMA. Usando inteligência puramente do Gemini.")
+                                with st.spinner("Buscando CNPJ e cruzando com o Compliance..."):
+                                    identificacao_real = ativo_mov
                                     
-                                    # 2. Manda o resultado pro Gemini classificar nas gavetas
+                                    # SE TEM NÚMERO, É PROVÁVEL CNPJ: Bate nas APIs!
+                                    if re.search(r'\d', ativo_mov):
+                                        cnpj_limpo = re.sub(r'[^0-9]', '', ativo_mov)
+                                        if len(cnpj_limpo) == 14:
+                                            # Tentativa 1: ANBIMA
+                                            res_anbima = consultar_fundo_anbima(cnpj_limpo)
+                                            if res_anbima:
+                                                identificacao_real = res_anbima
+                                                st.info(f"✅ ANBIMA Localizou: **{identificacao_real}**")
+                                            else:
+                                                # Tentativa 2: RECEITA FEDERAL (Brasil API)
+                                                res_rfb = consultar_brasil_api(cnpj_limpo)
+                                                if res_rfb:
+                                                    identificacao_real = res_rfb
+                                                    st.info(f"✅ Receita Federal Localizou: **{identificacao_real}**")
+                                                else:
+                                                    st.warning("⚠️ Ativo não achado nas bases oficiais. Usando IA pura.")
+                                    
+                                    # 3. Manda o NOME REAL (não o CNPJ cego) para o Gemini classificar
                                     r_vinculo = conn.table("regulamentos").select("categorias_definidas").eq("fundo_nome", fundo_ativo).execute()
                                     chaves = list(r_vinculo.data[0].get('categorias_definidas', {}).keys()) if r_vinculo.data else []
                                     
                                     prompt_pre = f"""
-                                    O gestor quer comprar o ativo identificado no mercado como: '{identificacao_anbima}'.
-                                    1. Se for uma classe ANBIMA conhecida, classifique a natureza real (ex: Fundo Multimercado, Renda Fixa).
-                                    2. Escolha UMA destas chaves do regulamento: {chaves}. Se não couber, retorne 'Desenquadrado'.
+                                    O gestor está boletando: '{identificacao_real}'.
+                                    1. Diga a natureza de mercado desse ativo (ex: 'Fundo Multimercado', 'Debênture'). SE você ler "FIM" ou "Multimercado", classifique como tal.
+                                    2. Escolha UMA chave: {chaves}. Se o ativo não encaixar perfeitamente, retorne 'Desenquadrado'.
                                     JSON EXATO: {{ "tipo_ativo": "NATUREZA", "gaveta_matematica": "CHAVE" }}
                                     """
                                     res, motor = chamar_ia_hydra(prompt_pre)
                                     classif = extrair_json_seguro(res.text)
                                     
-                                    tipo_ia = classif.get('tipo_ativo', 'Não Identificado')
+                                    tipo_ia = classif.get('tipo_ativo', 'Desconhecido')
                                     gaveta_ia = classif.get('gaveta_matematica', 'Desenquadrado')
                                     
                                     payload = {
                                         "fundo_nome": fundo_ativo, "data": data_sel, "tipo": "Compra", 
-                                        "ativo": identificacao_anbima, "valor": valor_mov, 
+                                        "ativo": identificacao_real, "valor": valor_mov, 
                                         "tipo_ativo_ia": tipo_ia, "gaveta_ia": gaveta_ia,
                                         "status": "Pendente"
                                     }
                                     conn.table("movimentacoes_ativo").insert(payload).execute()
-                                    st.info(f"🧠 **Diagnóstico IA:** Natureza: **{tipo_ia}**. Gaveta: **{gaveta_ia}**.")
-                                    st.success("Ordem enviada para a Fila de Aprovação (Checker).")
+                                    st.info(f"🧠 **Diagnóstico Final IA:** Natureza: **{tipo_ia}**. Gaveta: **{gaveta_ia}**.")
+                                    st.success("Ordem aguardando no Checker.")
 
             # --- ABA 2: CHECKER E RELATÓRIO ---
             with aba2:
