@@ -4,15 +4,16 @@ from st_supabase_connection import SupabaseConnection
 import google.generativeai as genai
 import json
 import re
+import requests
+import base64
 from datetime import datetime
 from pypdf import PdfReader
 
 # --- 1. CONFIGURAÇÃO E ESTILO ---
-st.set_page_config(page_title="Guardian Ultra v29", layout="wide", page_icon="🛡️")
+st.set_page_config(page_title="Guardian Ultra v31", layout="wide", page_icon="🛡️")
 
 st.markdown("""
     <style>
-    .boleta-container { border: 1px solid #444; border-radius: 8px; padding: 20px; background-color: #1e1e1e; }
     .card-checker { border-left: 4px solid #f39c12; padding: 15px; background-color: #2c2c2c; margin-bottom: 10px; border-radius: 5px;}
     </style>
 """, unsafe_allow_html=True)
@@ -29,18 +30,19 @@ def extrair_data_arquivo(nome_arquivo):
     return datetime.today().strftime('%Y-%m-%d')
 
 def extrair_json_seguro(texto_ia):
-    # Tenta extrair o JSON mesmo se a IA colocar Markdown ou texto em volta
     try:
         inicio = texto_ia.find('{')
         fim = texto_ia.rfind('}') + 1
         return json.loads(texto_ia[inicio:fim])
     except:
-        return {} # Retorna vazio se der erro, evitando o app crashar
+        return {}
 
-# --- 2. CONEXÃO IA ---
+# --- 2. INTEGRAÇÃO ANBIMA & GEMINI ---
 gemini_key = st.secrets.get("GEMINI_API_KEY")
-if gemini_key: genai.configure(api_key=gemini_key)
+anbima_client_id = st.secrets.get("ANBIMA_CLIENT_ID")
+anbima_client_secret = st.secrets.get("ANBIMA_CLIENT_SECRET")
 
+if gemini_key: genai.configure(api_key=gemini_key)
 MODELOS = ['models/gemini-1.5-flash', 'models/gemini-3.1-flash-lite-preview']
 
 def chamar_ia_hydra(prompt):
@@ -50,6 +52,45 @@ def chamar_ia_hydra(prompt):
             return model.generate_content(prompt), m
         except: continue
     raise Exception("Modelos IA indisponíveis no momento.")
+
+# Função para Gerar Token da ANBIMA
+def obter_token_anbima():
+    if not anbima_client_id or not anbima_client_secret: return None
+    url = "https://api.anbima.com.br/oauth/access-token"
+    auth_str = f"{anbima_client_id}:{anbima_client_secret}"
+    b64_auth_str = base64.b64encode(auth_str.encode()).decode()
+    headers = {
+        "Authorization": f"Basic {b64_auth_str}",
+        "Content-Type": "application/json"
+    }
+    payload = {"grant_type": "client_credentials"}
+    try:
+        resp = requests.post(url, headers=headers, json=payload)
+        if resp.status_code == 200:
+            return resp.json().get("access_token")
+    except: return None
+    return None
+
+# Função para Buscar Fundo na ANBIMA via CNPJ
+def consultar_fundo_anbima(cnpj):
+    token = obter_token_anbima()
+    if not token: return None
+    cnpj_limpo = re.sub(r'[^0-9]', '', cnpj)
+    url = f"https://api.anbima.com.br/feed/fundos/v2/fundos/{cnpj_limpo}"
+    headers = {
+        "client_id": anbima_client_id,
+        "access_token": token
+    }
+    try:
+        resp = requests.get(url, headers=headers)
+        if resp.status_code == 200:
+            dados = resp.json()
+            # A ANBIMA retorna muita coisa. Vamos pegar a Denominação Social e a Classe ANBIMA
+            nome = dados.get('informacoes_cadastrais', {}).get('denominacao_social', cnpj)
+            classe = dados.get('informacoes_cadastrais', {}).get('classe_anbima', 'Fundo de Investimento')
+            return f"{nome} (Classe ANBIMA: {classe})"
+    except: return None
+    return None
 
 conn = st.connection("supabase", type=SupabaseConnection)
 
@@ -136,13 +177,14 @@ elif menu == "🤖 Importar Carteira":
                 chaves_permitidas = list(r_vinculo.data[0].get('categorias_definidas', {}).keys()) if (r_vinculo.data and r_vinculo.data[0].get('categorias_definidas')) else []
 
                 df = pd.read_excel(upload_c)
+                
                 prompt_c = f"""
                 Você é um Analista de Dados da ANBIMA e Risco de Compliance.
-                Acesse a carteira de investimentos enviada.
-                PASSO 1: Identifique a natureza REAL de mercado do ativo (Ex: 'Fundo Multimercado', 'Fundo de Debêntures', 'ETF').
-                PASSO 2: Encaixe em UMA destas chaves exclusivas do fundo: {chaves_permitidas}. Se não for 100% aderente, use 'Desenquadrado'.
+                PASSO 1: Identifique a natureza REAL de cada ativo (Ex: Fundo Multimercado, LFT, FIDC). 
+                PASSO 2: O regulamento SÓ ACEITA as seguintes chaves: {chaves_permitidas}.
+                SE o ativo não se enquadrar PERFEITAMENTE, a 'gaveta_matematica' OBRIGATORIAMENTE deve ser 'Desenquadrado'.
                 
-                JSON DE SAÍDA: {{'resumo': {{'pl': 0.0, 'cota': 0.0}}, 'ativos': [{{'ativo': 'NOME', 'valor_mercado': 0.0, 'tipo_ativo': 'NATUREZA_REAL', 'gaveta_matematica': 'CHAVE_EXATA'}}], 'despesas': [{{'item': 'NOME', 'valor': 0.0}}]}}
+                JSON DE SAÍDA: {{'resumo': {{'pl': 0.0, 'cota': 0.0}}, 'ativos': [{{'ativo': 'NOME', 'valor_mercado': 0.0, 'tipo_ativo': 'NATUREZA_REAL_ANBIMA', 'gaveta_matematica': 'CHAVE_OU_DESENQUADRADO'}}], 'despesas': [{{'item': 'NOME', 'valor': 0.0}}]}}
                 DADOS: {df.dropna(how='all').head(300).to_string()}
                 """
                 res, motor = chamar_ia_hydra(prompt_c)
@@ -153,8 +195,7 @@ elif menu == "🤖 Importar Carteira":
                     st.session_state['temp_c'] = {'data': data, 'data_arq': data_arq, 'fundo': fundo_vinculo}
                     st.success("Análise de Risco Concluída!")
                     st.dataframe(pd.DataFrame(data.get('ativos', [])))
-                else:
-                    st.error("A IA retornou um formato inválido. Tente novamente.")
+                else: st.error("A IA retornou um formato inválido. Tente novamente.")
 
         if 'temp_c' in st.session_state and st.button("💾 Gravar no Database"):
             tc = st.session_state['temp_c']
@@ -167,7 +208,7 @@ elif menu == "🤖 Importar Carteira":
             del st.session_state['temp_c']
             st.rerun()
 
-# --- 6. 📉 MESA DE OPERAÇÕES (DOUBLE CHECK REAL) ---
+# --- 6. 📉 MESA DE OPERAÇÕES (NOVO ATIVO VIA ANBIMA) ---
 elif menu == "📉 Mesa de Operações":
     st.subheader(f"📉 OMS (Order Management System): {fundo_ativo}")
     if fundo_ativo != "Nenhum":
@@ -183,60 +224,71 @@ elif menu == "📉 Mesa de Operações":
             
             # --- ABA 1: MAKER ---
             with aba1:
-                st.markdown('<div class="boleta-container">', unsafe_allow_html=True)
-                st.markdown("#### 📝 Lançamento de Ordem")
-                tipo_ativo_boleta = st.radio("Selecione o tipo de ordem:", ["Ativo Existente na Carteira", "Novo Ativo (Requer Pré-Trade IA)"], horizontal=True)
-                st.divider()
-                
-                with st.form("form_boleta_oms"):
-                    col_t, col_a, col_v = st.columns([1, 2, 1])
-                    tipo_mov = col_t.selectbox("Natureza", ["Compra", "Venda"])
-                    valor_mov = col_v.number_input("Volume Financeiro (R$)", min_value=0.01, step=10000.0, format="%.2f")
+                with st.container(border=True):
+                    st.markdown("#### 📝 Lançamento de Ordem")
+                    tipo_ativo_boleta = st.radio("Selecione o tipo de ordem:", ["Ativo Existente na Carteira", "Novo Ativo (Pré-Trade c/ Consulta ANBIMA)"], horizontal=True)
+                    st.divider()
                     
-                    if "Existente" in tipo_ativo_boleta:
-                        ativo_mov = col_a.selectbox("Ativo Alvo", df_ativos['ativo'].tolist() if not df_ativos.empty else [])
-                        if st.form_submit_button("Gerar Boleta Pendente"):
-                            linha_ativo = df_ativos[df_ativos['ativo'] == ativo_mov].iloc[0]
-                            payload = {
-                                "fundo_nome": fundo_ativo, "data": data_sel, "tipo": tipo_mov, 
-                                "ativo": ativo_mov, "valor": valor_mov, 
-                                "tipo_ativo_ia": linha_ativo['tipo_ativo'], "gaveta_ia": linha_ativo['gaveta_matematica'],
-                                "status": "Pendente"
-                            }
-                            conn.table("movimentacoes_ativo").insert(payload).execute()
-                            st.success(f"Ordem de {ativo_mov} enviada para o Checker.")
-                    else:
-                        ativo_mov = col_a.text_input("Ticker / Nome Institucional / CNPJ")
-                        if st.form_submit_button("Analisar Pré-Trade e Gerar Boleta") and ativo_mov:
-                            with st.spinner("Compliance pré-trade verificando ativo no mercado..."):
-                                r_vinculo = conn.table("regulamentos").select("categorias_definidas").eq("fundo_nome", fundo_ativo).execute()
-                                chaves = list(r_vinculo.data[0].get('categorias_definidas', {}).keys()) if r_vinculo.data else []
-                                
-                                # PROMPT BLINDADO E ESTRUTURADO PARA O NOVO ATIVO
-                                prompt_pre = f"""
-                                O gestor quer comprar o ativo: '{ativo_mov}'.
-                                RETORNE EXATAMENTE UM JSON VALIDO COM 2 CHAVES:
-                                "tipo_ativo": A natureza real de mercado desse ativo (ex: 'FIDC', 'Ação', 'Debênture').
-                                "gaveta_matematica": Escolha APENAS UMA destas chaves: {chaves}. Se o ativo não se enquadrar perfeitamente em nenhuma, retorne 'Desenquadrado'.
-                                Exemplo de saída: {{ "tipo_ativo": "FIDC", "gaveta_matematica": "Desenquadrado" }}
-                                """
-                                res, motor = chamar_ia_hydra(prompt_pre)
-                                classif = extrair_json_seguro(res.text)
-                                
-                                # Uso de .get() para blindar contra o KeyError que você sofreu!
-                                tipo_ia = classif.get('tipo_ativo', 'Não Identificado')
-                                gaveta_ia = classif.get('gaveta_matematica', 'Desenquadrado')
-                                
+                    with st.form("form_boleta_oms"):
+                        col_t, col_a, col_v = st.columns([1, 2, 1])
+                        tipo_mov = col_t.selectbox("Natureza", ["Compra", "Venda"])
+                        valor_mov = col_v.number_input("Volume Financeiro (R$)", min_value=0.01, step=10000.0, format="%.2f")
+                        
+                        if "Existente" in tipo_ativo_boleta:
+                            ativo_mov = col_a.selectbox("Ativo Alvo", df_ativos['ativo'].tolist() if not df_ativos.empty else [])
+                            enviar_ordem = st.form_submit_button("Gerar Boleta Pendente")
+                            
+                            if enviar_ordem:
+                                linha_ativo = df_ativos[df_ativos['ativo'] == ativo_mov].iloc[0]
                                 payload = {
-                                    "fundo_nome": fundo_ativo, "data": data_sel, "tipo": "Compra", 
+                                    "fundo_nome": fundo_ativo, "data": data_sel, "tipo": tipo_mov, 
                                     "ativo": ativo_mov, "valor": valor_mov, 
-                                    "tipo_ativo_ia": tipo_ia, "gaveta_ia": gaveta_ia,
+                                    "tipo_ativo_ia": linha_ativo['tipo_ativo'], "gaveta_ia": linha_ativo['gaveta_matematica'],
                                     "status": "Pendente"
                                 }
                                 conn.table("movimentacoes_ativo").insert(payload).execute()
-                                st.info(f"🧠 **Diagnóstico da IA:** O ativo '{ativo_mov}' é do tipo **{tipo_ia}**. Para este fundo, ele foi classificado como: **{gaveta_ia}**.")
-                                st.success("Ordem enviada para a Fila de Aprovação (Checker).")
-                st.markdown('</div>', unsafe_allow_html=True)
+                                st.success(f"Ordem de {tipo_mov} de {ativo_mov} enviada para o Checker.")
+                        else:
+                            ativo_mov = col_a.text_input("Ticker ou CNPJ do Ativo (Ex: 51.556.428/0001-56)")
+                            enviar_ordem = st.form_submit_button("Consultar ANBIMA e Gerar Boleta")
+                            
+                            if enviar_ordem and ativo_mov:
+                                with st.spinner("Consultando bases oficiais ANBIMA e cruzando com o Compliance..."):
+                                    # 1. Bate na API da ANBIMA primeiro
+                                    identificacao_anbima = ativo_mov
+                                    if re.search(r'\d', ativo_mov): # Se tiver número, assume que pode ser CNPJ
+                                        resultado_api = consultar_fundo_anbima(ativo_mov)
+                                        if resultado_api:
+                                            identificacao_anbima = resultado_api
+                                            st.info(f"✅ Encontrado na ANBIMA: **{identificacao_anbima}**")
+                                        else:
+                                            st.warning("⚠️ Ativo não localizado via API ANBIMA. Usando inteligência puramente do Gemini.")
+                                    
+                                    # 2. Manda o resultado pro Gemini classificar nas gavetas
+                                    r_vinculo = conn.table("regulamentos").select("categorias_definidas").eq("fundo_nome", fundo_ativo).execute()
+                                    chaves = list(r_vinculo.data[0].get('categorias_definidas', {}).keys()) if r_vinculo.data else []
+                                    
+                                    prompt_pre = f"""
+                                    O gestor quer comprar o ativo identificado no mercado como: '{identificacao_anbima}'.
+                                    1. Se for uma classe ANBIMA conhecida, classifique a natureza real (ex: Fundo Multimercado, Renda Fixa).
+                                    2. Escolha UMA destas chaves do regulamento: {chaves}. Se não couber, retorne 'Desenquadrado'.
+                                    JSON EXATO: {{ "tipo_ativo": "NATUREZA", "gaveta_matematica": "CHAVE" }}
+                                    """
+                                    res, motor = chamar_ia_hydra(prompt_pre)
+                                    classif = extrair_json_seguro(res.text)
+                                    
+                                    tipo_ia = classif.get('tipo_ativo', 'Não Identificado')
+                                    gaveta_ia = classif.get('gaveta_matematica', 'Desenquadrado')
+                                    
+                                    payload = {
+                                        "fundo_nome": fundo_ativo, "data": data_sel, "tipo": "Compra", 
+                                        "ativo": identificacao_anbima, "valor": valor_mov, 
+                                        "tipo_ativo_ia": tipo_ia, "gaveta_ia": gaveta_ia,
+                                        "status": "Pendente"
+                                    }
+                                    conn.table("movimentacoes_ativo").insert(payload).execute()
+                                    st.info(f"🧠 **Diagnóstico IA:** Natureza: **{tipo_ia}**. Gaveta: **{gaveta_ia}**.")
+                                    st.success("Ordem enviada para a Fila de Aprovação (Checker).")
 
             # --- ABA 2: CHECKER E RELATÓRIO ---
             with aba2:
@@ -253,9 +305,7 @@ elif menu == "📉 Mesa de Operações":
                             
                             c_info1, c_info2 = st.columns(2)
                             c_info1.markdown(f"💰 **Volume Financeiro:** {format_br(op['valor'])}")
-                            
-                            # Explicação clara para você (O Checker) não ficar confuso
-                            c_info2.markdown(f"🔍 **O que o mercado diz que é:** {op['tipo_ativo_ia']}<br>🗄️ **Onde entra no nosso Fundo:** {op['gaveta_ia']}", unsafe_allow_html=True)
+                            c_info2.markdown(f"🔍 **Natureza Real:** {op['tipo_ativo_ia']}<br>🗄️ **Enquadramento no Fundo:** {op['gaveta_ia']}", unsafe_allow_html=True)
                             
                             col_btn1, col_btn2, col_btn3 = st.columns([1, 1, 2])
                             if col_btn1.button("✅ Aprovar na Carteira", key=f"apr_{op['id']}"):
@@ -304,13 +354,12 @@ elif menu == "📜 Regulamento":
                 
                 prompt_reg = f"""
                 Você é um Auditor de Risco e Compliance Sênior da CVM. 
-                Transforme o regulamento em um motor matemático JSON.
-                1. FOQUE nas regras de enquadramento PERMANENTES.
+                Transforme o regulamento em um motor matemático JSON rigoroso.
+                1. FOQUE nas regras PERMANENTES (Política de Investimento e Anexo I).
                 2. IGNORE carências iniciais.
-                3. TIPO: 'Não pode exceder' = maximo_percentual. 'Deve investir no mínimo' = minimo_percentual.
-                4. LIMITES: Retorne FLOAT (ex: 67% = 0.67).
+                3. LIMITES: Retorne apenas FLOAT (ex: 67% = 0.67).
                 
-                JSON: {{ "fundo": "NOME", "cnpj": "CNPJ", "mandato": "Mandato", "regras": [{{ "id": "regra_1", "tipo": "minimo_percentual", "limite_min": 0.67, "categorias": ["chave_1"] }}], "categorias_definidas": {{ "chave_1": "Descricao" }} }}
+                JSON EXATO: {{ "fundo": "NOME COMPLETO", "cnpj": "CNPJ", "mandato": "Mandato Principal", "regras": [{{ "id": "minimo_estrategia", "tipo": "minimo_percentual", "limite_min": 0.67, "categorias": ["chave_1"] }}], "categorias_definidas": {{ "chave_1": "Descricao legível da categoria" }} }}
                 TEXTO: {texto[:35000]}
                 """
                 res, motor = chamar_ia_hydra(prompt_reg)
