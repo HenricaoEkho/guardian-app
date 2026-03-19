@@ -6,15 +6,17 @@ import json
 import re
 import requests
 import base64
+import yfinance as yf
 from datetime import datetime
 from pypdf import PdfReader
 
 # --- 1. CONFIGURAÇÃO E ESTILO ---
-st.set_page_config(page_title="Guardian Ultra v35", layout="wide", page_icon="🛡️")
+st.set_page_config(page_title="Guardian Ultra v36", layout="wide", page_icon="🛡️")
 
 st.markdown("""
     <style>
     .card-checker { border-left: 4px solid #f39c12; padding: 15px; background-color: #2c2c2c; margin-bottom: 10px; border-radius: 5px;}
+    .dossie-box { background-color: #0e1117; border: 1px solid #00ff00; padding: 10px; border-radius: 5px; margin-bottom: 15px;}
     </style>
 """, unsafe_allow_html=True)
 
@@ -37,7 +39,7 @@ def extrair_json_seguro(texto_ia):
     except:
         return {}
 
-# --- 2. INTEGRAÇÃO APIs E IA ---
+# --- 2. INTEGRAÇÃO APIs, WEB E IA ---
 gemini_key = st.secrets.get("GEMINI_API_KEY")
 anbima_client_id = st.secrets.get("ANBIMA_CLIENT_ID")
 anbima_client_secret = st.secrets.get("ANBIMA_CLIENT_SECRET")
@@ -53,6 +55,7 @@ def chamar_ia_hydra(prompt):
         except: continue
     raise Exception("Modelos IA indisponíveis no momento.")
 
+# AS 3 FONTES DE VERDADE DA INTERNET
 def obter_token_anbima():
     if not anbima_client_id or not anbima_client_secret: return None
     url = "https://api.anbima.com.br/oauth/access-token"
@@ -66,32 +69,57 @@ def obter_token_anbima():
     except: return None
     return None
 
-def consultar_fundo_anbima(cnpj):
-    token = obter_token_anbima()
-    if not token: return None
-    cnpj_limpo = re.sub(r'[^0-9]', '', cnpj)
-    url = f"https://api.anbima.com.br/feed/fundos/v2/fundos/{cnpj_limpo}"
-    headers = {"client_id": anbima_client_id, "access_token": token}
-    try:
-        resp = requests.get(url, headers=headers, timeout=5)
-        if resp.status_code == 200:
-            dados = resp.json()
-            nome = dados.get('informacoes_cadastrais', {}).get('denominacao_social', cnpj)
-            classe = dados.get('informacoes_cadastrais', {}).get('classe_anbima', 'Fundo')
-            return f"{nome} ({classe})"
-    except: return None
-    return None
+def buscar_dados_internet(termo_busca):
+    dossie = {"termo": termo_busca, "fonte": "Nenhuma Base Oficial", "dados": "O ativo não foi encontrado na internet. Classifique pelo nome."}
+    
+    # 1. É CNPJ?
+    if re.search(r'\d{4}', termo_busca):
+        cnpj_limpo = re.sub(r'[^0-9]', '', termo_busca)
+        if len(cnpj_limpo) == 14:
+            # Tenta ANBIMA
+            token = obter_token_anbima()
+            if token:
+                url_anbima = f"https://api.anbima.com.br/feed/fundos/v2/fundos/{cnpj_limpo}"
+                headers = {"client_id": anbima_client_id, "access_token": token}
+                try:
+                    resp = requests.get(url_anbima, headers=headers, timeout=5)
+                    if resp.status_code == 200:
+                        dados = resp.json()
+                        nome = dados.get('informacoes_cadastrais', {}).get('denominacao_social', termo_busca)
+                        classe = dados.get('informacoes_cadastrais', {}).get('classe_anbima', 'Fundo')
+                        dossie["fonte"] = "API ANBIMA (Oficial)"
+                        dossie["dados"] = f"Nome: {nome} | Classe Registrada: {classe}"
+                        return dossie
+                except: pass
+            
+            # Se ANBIMA falhar, tenta Receita Federal
+            url_rfb = f"https://brasilapi.com.br/api/cnpj/v1/{cnpj_limpo}"
+            try:
+                resp = requests.get(url_rfb, timeout=5)
+                if resp.status_code == 200:
+                    dados = resp.json()
+                    dossie["fonte"] = "Receita Federal (Brasil API)"
+                    dossie["dados"] = f"Razão Social: {dados.get('razao_social', termo_busca)} | CNAE: {dados.get('cnae_fiscal_descricao', '')}"
+                    return dossie
+            except: pass
+            
+    # 2. É TICKER DA BOLSA? (Ex: VALE3, BOVA11)
+    else:
+        try:
+            ticker_str = termo_busca.upper().strip()
+            if not ticker_str.endswith(".SA"): ticker_str += ".SA"
+            tk = yf.Ticker(ticker_str)
+            info = tk.info
+            if 'shortName' in info or 'longName' in info:
+                tipo = info.get('quoteType', 'Ação/Bolsa')
+                setor = info.get('sector', 'Financeiro/Outros')
+                nome = info.get('shortName', info.get('longName', termo_busca))
+                dossie["fonte"] = "Yahoo Finance (Bolsa B3 em Tempo Real)"
+                dossie["dados"] = f"Ativo: {nome} | Tipo Mercado: {tipo} | Setor: {setor}"
+                return dossie
+        except: pass
 
-def consultar_brasil_api(cnpj):
-    cnpj_limpo = re.sub(r'[^0-9]', '', cnpj)
-    url = f"https://brasilapi.com.br/api/cnpj/v1/{cnpj_limpo}"
-    try:
-        resp = requests.get(url, timeout=5)
-        if resp.status_code == 200:
-            dados = resp.json()
-            return dados.get("razao_social", cnpj)
-    except: return None
-    return None
+    return dossie
 
 conn = st.connection("supabase", type=SupabaseConnection)
 
@@ -174,15 +202,14 @@ elif menu == "🤖 Importar Carteira":
         if upload_c and st.button("🚀 Processar Arquivo"):
             data_arq = extrair_data_arquivo(upload_c.name)
             with st.spinner("Analisando dicionários de compliance..."):
-                r_vinculo = conn.table("regulamentos").select("categorias_definidas").execute()
+                r_vinculo = conn.table("regulamentos").select("categorias_definidas").eq("fundo_nome", fundo_vinculo).execute()
                 categorias_dict = r_vinculo.data[0].get('categorias_definidas', {}) if r_vinculo.data else {}
 
                 df = pd.read_excel(upload_c)
                 
-                # PROMPT LIMPO: Sem forçar regras de master/feeder
                 prompt_c = f"""
                 Você é o Diretor de Risco.
-                PASSO 1: Diga a natureza REAL de mercado de cada ativo (Ex: Fundo Multimercado, LFT, Debênture).
+                PASSO 1: Diga a natureza REAL de mercado de cada ativo (Ex: Fundo Multimercado, LFT, FIDC).
                 PASSO 2: As gavetas de compliance e suas definições exatas são: {json.dumps(categorias_dict, ensure_ascii=False)}.
                 - Avalie a descrição de cada gaveta. Se o ativo bater semanticamente com a descrição, escolha a chave correspondente.
                 - Se realmente não se enquadrar em NENHUMA descrição, use 'Desenquadrado'.
@@ -211,7 +238,7 @@ elif menu == "🤖 Importar Carteira":
             del st.session_state['temp_c']
             st.rerun()
 
-# --- 6. 📉 MESA DE OPERAÇÕES ---
+# --- 6. 📉 MESA DE OPERAÇÕES (AGORA COM O ORÁCULO DA WEB) ---
 elif menu == "📉 Mesa de Operações":
     st.subheader(f"📉 OMS (Order Management System): {fundo_ativo}")
     if fundo_ativo != "Nenhum":
@@ -228,7 +255,7 @@ elif menu == "📉 Mesa de Operações":
             with aba1:
                 with st.container(border=True):
                     st.markdown("#### 📝 Lançamento de Ordem")
-                    tipo_ativo_boleta = st.radio("Selecione o tipo de ordem:", ["Ativo Existente na Carteira", "Novo Ativo (Pré-Trade c/ Consulta)"], horizontal=True)
+                    tipo_ativo_boleta = st.radio("Selecione o tipo de ordem:", ["Ativo Existente na Carteira", "Novo Ativo (Pré-Trade c/ Busca na Web)"], horizontal=True)
                     st.divider()
                     
                     with st.form("form_boleta_oms"):
@@ -238,9 +265,7 @@ elif menu == "📉 Mesa de Operações":
                         
                         if "Existente" in tipo_ativo_boleta:
                             ativo_mov = col_a.selectbox("Ativo Alvo", df_ativos['ativo'].tolist() if not df_ativos.empty else [])
-                            enviar_ordem = st.form_submit_button("Gerar Boleta Pendente")
-                            
-                            if enviar_ordem:
+                            if st.form_submit_button("Gerar Boleta Pendente"):
                                 linha_ativo = df_ativos[df_ativos['ativo'] == ativo_mov].iloc[0]
                                 payload = {
                                     "fundo_nome": fundo_ativo, "data": data_sel, "tipo": tipo_mov, 
@@ -251,35 +276,38 @@ elif menu == "📉 Mesa de Operações":
                                 conn.table("movimentacoes_ativo").insert(payload).execute()
                                 st.success(f"Ordem de {tipo_mov} de {ativo_mov} enviada para o Checker.")
                         else:
-                            ativo_mov = col_a.text_input("Ticker ou CNPJ (Ex: 51.556.428/0001-56)")
-                            enviar_ordem = st.form_submit_button("Consultar e Analisar Risco")
+                            ativo_mov = col_a.text_input("Ticker da Bolsa ou CNPJ (Ex: VALE3, 51.556.428/0001-56)")
+                            enviar_ordem = st.form_submit_button("Consultar Oráculo da Web e Analisar Risco")
                             
                             if enviar_ordem and ativo_mov:
-                                with st.spinner("Buscando CNPJ e cruzando com o dicionário de Compliance..."):
-                                    identificacao_real = ativo_mov
-                                    if re.search(r'\d', ativo_mov):
-                                        cnpj_limpo = re.sub(r'[^0-9]', '', ativo_mov)
-                                        if len(cnpj_limpo) == 14:
-                                            res_anbima = consultar_fundo_anbima(cnpj_limpo)
-                                            if res_anbima:
-                                                identificacao_real = res_anbima
-                                                st.info(f"✅ ANBIMA Localizou: **{identificacao_real}**")
-                                            else:
-                                                res_rfb = consultar_brasil_api(cnpj_limpo)
-                                                if res_rfb:
-                                                    identificacao_real = res_rfb
-                                                    st.info(f"✅ Receita Federal Localizou: **{identificacao_real}**")
+                                with st.spinner("Buscando dados em tempo real na ANBIMA, Receita Federal e B3..."):
+                                    # 1. O Python navega na internet e monta o dossiê
+                                    dossie = buscar_dados_internet(ativo_mov)
+                                    
+                                    # Mostra o resultado da pesquisa na tela pra você ver
+                                    st.markdown(f"""
+                                    <div class="dossie-box">
+                                        <b>🌐 Dossiê da Internet:</b><br>
+                                        Fonte: <i>{dossie['fonte']}</i><br>
+                                        Dados Encontrados: <b>{dossie['dados']}</b>
+                                    </div>
+                                    """, unsafe_allow_html=True)
                                     
                                     r_vinculo = conn.table("regulamentos").select("categorias_definidas").eq("fundo_nome", fundo_ativo).execute()
                                     categorias_dict = r_vinculo.data[0].get('categorias_definidas', {}) if r_vinculo.data else {}
                                     
-                                    # PROMPT LIMPO: Sem hardcodes
+                                    # 2. Esfrega o dossiê na cara da IA
                                     prompt_pre = f"""
-                                    O gestor está boletando: '{identificacao_real}'.
-                                    1. Diga a natureza TÉCNICA real desse ativo (ex: Fundo Multimercado, LFT).
+                                    Você é o Gestor de Risco do fundo '{fundo_ativo}'.
+                                    O ativo que o operador digitou foi '{ativo_mov}'. Nós pesquisamos na internet e encontramos O SEGUINTE DOSSIÊ OFICIAL:
+                                    "{dossie['dados']}"
+                                    
+                                    SUA TAREFA:
+                                    1. Diga a natureza TÉCNICA desse ativo baseando-se EXCLUSIVAMENTE no Dossiê acima.
                                     2. O regulamento possui estas gavetas e definições: {json.dumps(categorias_dict, ensure_ascii=False)}.
-                                    - Verifique a semântica: se o ativo '{identificacao_real}' corresponder à descrição de alguma gaveta, use a chave dela.
-                                    - Se nenhuma servir, retorne 'Desenquadrado'.
+                                    - Verifique a semântica: A descrição de alguma gaveta bate com os dados do Dossiê? Se sim, use a chave dela.
+                                    - Se não tiver relação direta, retorne 'Desenquadrado'.
+                                    
                                     JSON EXATO: {{ "tipo_ativo": "NATUREZA", "gaveta_matematica": "CHAVE_OU_DESENQUADRADO" }}
                                     """
                                     res, motor = chamar_ia_hydra(prompt_pre)
@@ -290,14 +318,14 @@ elif menu == "📉 Mesa de Operações":
                                     
                                     payload = {
                                         "fundo_nome": fundo_ativo, "data": data_sel, "tipo": "Compra", 
-                                        "ativo": identificacao_real, "valor": valor_mov, 
+                                        "ativo": ativo_mov, "valor": valor_mov, 
                                         "tipo_ativo_ia": tipo_ia, "gaveta_ia": gaveta_ia,
                                         "status": "Pendente"
                                     }
                                     conn.table("movimentacoes_ativo").insert(payload).execute()
                                     
                                     cor = "red" if gaveta_ia == 'Desenquadrado' else "green"
-                                    st.info(f"🧠 **Diagnóstico IA:** Natureza: **{tipo_ia}**. Gaveta: :{cor}[**{gaveta_ia}**].")
+                                    st.info(f"🧠 **Diagnóstico IA (Pós-Internet):** Natureza: **{tipo_ia}**. Gaveta: :{cor}[**{gaveta_ia}**].")
                                     st.success("Ordem aguardando aprovação no Checker.")
 
             with aba2:
@@ -345,7 +373,7 @@ elif menu == "📉 Mesa de Operações":
                     st.dataframe(df_view_hist, use_container_width=True)
                 else: st.info("Order Book vazio.")
 
-# --- 7. 📜 REGULAMENTO (A ORIGEM DA INTELIGÊNCIA) ---
+# --- 7. 📜 REGULAMENTO ---
 elif menu == "📜 Regulamento":
     st.subheader("📜 Arquiteto de Risco (CVM 175)")
     upload_reg = st.file_uploader("Suba o PDF do Regulamento", type=['pdf'])
@@ -355,12 +383,10 @@ elif menu == "📜 Regulamento":
             try:
                 reader = PdfReader(upload_reg)
                 texto = "".join([p.extract_text() for p in reader.pages[:60]])
-                
-                # PROMPT BLINDADO: Ele pede para a IA capturar o nome do fundo Master se houver
                 prompt_reg = f"""
                 Auditor CVM. 
                 1. Extraia regras de enquadramento PERMANENTES.
-                2. CRIE 'categorias_definidas' com DESCRIÇÕES COMPLETAS. Se a regra for investir em um fundo específico (Master), COLOQUE O NOME DO FUNDO MASTER NA DESCRIÇÃO (Ex: "Cotas do fundo SPX Raptor Ekho...").
+                2. CRIE 'categorias_definidas' EXPLICANDO o que cada gaveta significa (Ex: Se for um FIC que investe em um Master, coloque o NOME EXATO do fundo Master na descrição).
                 JSON EXATO: {{ "fundo": "NOME COMPLETO", "cnpj": "CNPJ", "mandato": "Mandato", "regras": [{{ "id": "minimo", "tipo": "minimo_percentual", "limite_min": 0.67, "categorias": ["chave_1"] }}], "categorias_definidas": {{ "chave_1": "Definicao detalhada com nomes se houver" }} }}
                 TEXTO: {texto[:35000]}
                 """
@@ -379,6 +405,6 @@ elif menu == "📜 Regulamento":
             "regras_json": d.get('regras', []), "categorias_definidas": d.get('categorias_definidas', {})
         }
         conn.table("regulamentos").upsert(payload, on_conflict="fundo_nome").execute()
-        st.success("Motor ativado! Sem hardcodes.")
+        st.success("Motor ativado!")
         del st.session_state['schema_reg']
         st.rerun()
