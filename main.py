@@ -10,12 +10,11 @@ from datetime import datetime
 from pypdf import PdfReader
 
 # --- 1. CONFIGURAÇÃO E ESTILO ---
-st.set_page_config(page_title="Guardian Ultra v33", layout="wide", page_icon="🛡️")
+st.set_page_config(page_title="Guardian Ultra v34", layout="wide", page_icon="🛡️")
 
 st.markdown("""
     <style>
     .card-checker { border-left: 4px solid #f39c12; padding: 15px; background-color: #2c2c2c; margin-bottom: 10px; border-radius: 5px;}
-    .desenquadrado { color: #ff4b4b; font-weight: bold; }
     </style>
 """, unsafe_allow_html=True)
 
@@ -35,9 +34,10 @@ def extrair_json_seguro(texto_ia):
         inicio = texto_ia.find('{')
         fim = texto_ia.rfind('}') + 1
         return json.loads(texto_ia[inicio:fim])
-    except: return {}
+    except:
+        return {}
 
-# --- 2. CONEXÃO IA E APIs ---
+# --- 2. INTEGRAÇÃO APIs E IA ---
 gemini_key = st.secrets.get("GEMINI_API_KEY")
 anbima_client_id = st.secrets.get("ANBIMA_CLIENT_ID")
 anbima_client_secret = st.secrets.get("ANBIMA_CLIENT_SECRET")
@@ -51,7 +51,7 @@ def chamar_ia_hydra(prompt):
             model = genai.GenerativeModel(m)
             return model.generate_content(prompt), m
         except: continue
-    raise Exception("Modelos IA indisponíveis.")
+    raise Exception("Modelos IA indisponíveis no momento.")
 
 def obter_token_anbima():
     if not anbima_client_id or not anbima_client_secret: return None
@@ -134,7 +134,6 @@ if menu == "📊 Dashboard":
                 
                 st.write("### ✅ Enquadramento Legal")
                 for regra in reg.get('regras_json', []):
-                    # Só soma na regra os ativos que a IA classificou CORRETAMENTE na gaveta (sem "Desenquadrado")
                     ativos_regra = df_c[df_c['gaveta_matematica'].isin(regra['categorias'])]
                     v_soma = ativos_regra['valor_mercado'].sum()
                     perc = v_soma / pl_liquido if pl_liquido > 0 else 0
@@ -153,13 +152,7 @@ if menu == "📊 Dashboard":
                 df_view = df_c[['ativo', 'valor_mercado', 'tipo_ativo', 'gaveta_matematica']].copy()
                 df_view['% PL'] = (df_view['valor_mercado'] / pl_liquido * 100).apply(lambda x: f"{x:.2f}%")
                 df_view['valor_mercado'] = df_view['valor_mercado'].apply(format_br)
-                
-                # Destaca os desenquadrados na tabela
-                def colorir_desenquadrado(val):
-                    color = '#ff4b4b' if val == 'Desenquadrado' else ''
-                    return f'color: {color}'
-                
-                st.dataframe(df_view[['ativo', 'valor_mercado', '% PL', 'tipo_ativo', 'gaveta_matematica']].style.map(colorir_desenquadrado, subset=['gaveta_matematica']), use_container_width=True)
+                st.dataframe(df_view[['ativo', 'valor_mercado', '% PL', 'tipo_ativo', 'gaveta_matematica']], use_container_width=True)
                 
                 if not df_d.empty:
                     with st.expander("💸 Visualizar Despesas"):
@@ -169,7 +162,7 @@ if menu == "📊 Dashboard":
                         st.dataframe(df_d_view, use_container_width=True)
         else: st.warning("Nenhuma carteira importada para este fundo.")
 
-# --- 5. 🤖 IMPORTAR CARTEIRA (O FIM DO FORCED FIT) ---
+# --- 5. 🤖 IMPORTAR CARTEIRA ---
 elif menu == "🤖 Importar Carteira":
     st.subheader("📥 Carga Inicial e Classificação")
     if not lista_regulamentos:
@@ -180,29 +173,23 @@ elif menu == "🤖 Importar Carteira":
         
         if upload_c and st.button("🚀 Processar Arquivo"):
             data_arq = extrair_data_arquivo(upload_c.name)
-            with st.spinner("Motor de IA lendo mercado e regulamento (Aplicando travas)..."):
+            with st.spinner("Analisando dicionários de compliance..."):
                 r_vinculo = conn.table("regulamentos").select("categorias_definidas").eq("fundo_nome", fundo_vinculo).execute()
-                chaves_permitidas = list(r_vinculo.data[0].get('categorias_definidas', {}).keys()) if (r_vinculo.data and r_vinculo.data[0].get('categorias_definidas')) else []
+                # AGORA PASSAMOS O DICIONÁRIO COMPLETO (CHAVE + DESCRIÇÃO)
+                categorias_dict = r_vinculo.data[0].get('categorias_definidas', {}) if r_vinculo.data else {}
 
                 df = pd.read_excel(upload_c)
                 
-                # PROMPT COM FEW-SHOT EXAMPLES (Exemplos rígidos para ela não alucinar)
                 prompt_c = f"""
-                Você é um Analista de Risco de Compliance IMPLACÁVEL.
-                Sua tarefa é analisar a carteira de investimentos enviada e encaixá-la nas gavetas do regulamento.
-                As ÚNICAS chaves de gaveta permitidas são: {chaves_permitidas}.
-
-                REGRAS DE OURO:
-                1. 'tipo_ativo': Qual a natureza REAL e TÉCNICA do ativo? (Ex: Fundo Multimercado, LFT, Fundo de Ações, FIDC). Se tiver 'FIM', é Multimercado.
-                2. 'gaveta_matematica': Se a natureza do ativo NÃO FOR A EXATA DEFINIÇÃO da gaveta, escreva 'Desenquadrado'. É PROIBIDO forçar encaixes.
-
-                EXEMPLOS PRÁTICOS (SIGA ESTRITAMENTE):
-                - Se ativo é "SPX HRNT Fundo Multimercado" e gavetas são ["cotas_fic_fidc", "caixa"], a gaveta DEVE SER "Desenquadrado".
-                - Se ativo é "Fundo de Debêntures" e as gavetas são ["cotas_fic_fidc"], a gaveta DEVE SER "Desenquadrado".
-                - Se ativo é "FIDC Multiplica" e gavetas são ["cotas_fic_fidc"], a gaveta DEVE SER "cotas_fic_fidc".
-                - Se ativo é "Tesouro Selic" e gavetas são ["ativos_liquidez"], a gaveta DEVE SER "ativos_liquidez".
+                Você é o Diretor de Risco do fundo '{fundo_vinculo}'.
                 
-                JSON DE SAÍDA: {{'resumo': {{'pl': 0.0, 'cota': 0.0}}, 'ativos': [{{'ativo': 'NOME', 'valor_mercado': 0.0, 'tipo_ativo': 'NATUREZA_REAL', 'gaveta_matematica': 'CHAVE_EXATA_OU_DESENQUADRADO'}}], 'despesas': [{{'item': 'NOME', 'valor': 0.0}}]}}
+                PASSO 1: Diga a natureza REAL de mercado de cada ativo (Ex: Fundo Multimercado, LFT, FIDC, Debênture).
+                PASSO 2: As gavetas de compliance e suas definições são: {json.dumps(categorias_dict, ensure_ascii=False)}.
+                - Encaixe o ativo na CHAVE correspondente baseando-se na DESCRIÇÃO.
+                - REGRA DE MASTER/FEEDER: Se o ativo tiver um nome muito similar ao fundo '{fundo_vinculo}', ele é o Fundo Master! Encaixe-o na gaveta principal.
+                - Se realmente não se enquadrar em NENHUMA definição, use 'Desenquadrado'.
+                
+                JSON: {{'resumo': {{'pl': 0.0, 'cota': 0.0}}, 'ativos': [{{'ativo': 'NOME', 'valor_mercado': 0.0, 'tipo_ativo': 'NATUREZA_REAL', 'gaveta_matematica': 'CHAVE_OU_DESENQUADRADO'}}], 'despesas': [{{'item': 'NOME', 'valor': 0.0}}]}}
                 DADOS: {df.dropna(how='all').head(300).to_string()}
                 """
                 res, motor = chamar_ia_hydra(prompt_c)
@@ -213,7 +200,7 @@ elif menu == "🤖 Importar Carteira":
                     st.session_state['temp_c'] = {'data': data, 'data_arq': data_arq, 'fundo': fundo_vinculo}
                     st.success("Análise de Risco Concluída!")
                     st.dataframe(pd.DataFrame(data.get('ativos', [])))
-                else: st.error("A IA retornou um formato inválido. Tente novamente.")
+                else: st.error("Erro na resposta da IA.")
 
         if 'temp_c' in st.session_state and st.button("💾 Gravar no Database"):
             tc = st.session_state['temp_c']
@@ -222,7 +209,7 @@ elif menu == "🤖 Importar Carteira":
             for ds in d.get('despesas', []): ds['fundo_nome'] = fn; ds['data'] = dt
             if d.get('ativos'): conn.table("carteira_diaria").insert(d['ativos']).execute()
             if d.get('despesas'): conn.table("despesas_diarias").insert(d['despesas']).execute()
-            st.success("Carteira gravada com sucesso!")
+            st.success("Carteira gravada!")
             del st.session_state['temp_c']
             st.rerun()
 
@@ -240,6 +227,7 @@ elif menu == "📉 Mesa de Operações":
             
             aba1, aba2 = st.tabs(["🔀 Lançar Ordem (Maker)", "📋 Fila de Aprovação & Histórico (Checker)"])
             
+            # --- ABA 1: MAKER ---
             with aba1:
                 with st.container(border=True):
                     st.markdown("#### 📝 Lançamento de Ordem")
@@ -253,7 +241,9 @@ elif menu == "📉 Mesa de Operações":
                         
                         if "Existente" in tipo_ativo_boleta:
                             ativo_mov = col_a.selectbox("Ativo Alvo", df_ativos['ativo'].tolist() if not df_ativos.empty else [])
-                            if st.form_submit_button("Gerar Boleta Pendente"):
+                            enviar_ordem = st.form_submit_button("Gerar Boleta Pendente")
+                            
+                            if enviar_ordem:
                                 linha_ativo = df_ativos[df_ativos['ativo'] == ativo_mov].iloc[0]
                                 payload = {
                                     "fundo_nome": fundo_ativo, "data": data_sel, "tipo": tipo_mov, 
@@ -265,8 +255,10 @@ elif menu == "📉 Mesa de Operações":
                                 st.success(f"Ordem de {tipo_mov} de {ativo_mov} enviada para o Checker.")
                         else:
                             ativo_mov = col_a.text_input("Ticker ou CNPJ (Ex: 51.556.428/0001-56)")
-                            if st.form_submit_button("Consultar e Analisar Risco") and ativo_mov:
-                                with st.spinner("Buscando CNPJ e cruzando com o Compliance..."):
+                            enviar_ordem = st.form_submit_button("Consultar e Analisar Risco")
+                            
+                            if enviar_ordem and ativo_mov:
+                                with st.spinner("Buscando CNPJ e cruzando com o dicionário de Compliance..."):
                                     identificacao_real = ativo_mov
                                     if re.search(r'\d', ativo_mov):
                                         cnpj_limpo = re.sub(r'[^0-9]', '', ativo_mov)
@@ -280,18 +272,18 @@ elif menu == "📉 Mesa de Operações":
                                                 if res_rfb:
                                                     identificacao_real = res_rfb
                                                     st.info(f"✅ Receita Federal Localizou: **{identificacao_real}**")
-                                                else: st.warning("⚠️ CNPJ não achado. Usando IA pura.")
                                     
+                                    # BUSCA DICIONÁRIO COMPLETO
                                     r_vinculo = conn.table("regulamentos").select("categorias_definidas").eq("fundo_nome", fundo_ativo).execute()
-                                    chaves = list(r_vinculo.data[0].get('categorias_definidas', {}).keys()) if r_vinculo.data else []
+                                    categorias_dict = r_vinculo.data[0].get('categorias_definidas', {}) if r_vinculo.data else {}
                                     
-                                    # PROMPT FEW-SHOT PRÉ-TRADE
                                     prompt_pre = f"""
-                                    O gestor está boletando: '{identificacao_real}'.
-                                    1. 'tipo_ativo': Diga a natureza TÉCNICA real desse ativo (ex: Fundo Multimercado, Debênture). SE ler 'FIM' ou 'Multimercado', classifique como Multimercado.
-                                    2. 'gaveta_matematica': As ÚNICAS gavetas permitidas são: {chaves}. 
-                                    - Se a natureza do ativo NÃO BATER com a gaveta, retorne 'Desenquadrado'.
-                                    - Ex: Se ativo é Fundo Multimercado e a gaveta é 'cotas_fic_fidc', retorne 'Desenquadrado'.
+                                    Você é o Gestor de Risco do fundo '{fundo_ativo}'. Está avaliando comprar: '{identificacao_real}'.
+                                    
+                                    1. Diga a natureza TÉCNICA real desse ativo (ex: Fundo Multimercado, LFT). SE ler 'FIM', é Multimercado.
+                                    2. O regulamento possui estas gavetas e definições: {json.dumps(categorias_dict, ensure_ascii=False)}.
+                                    - REGRA MASTER: Se o nome do ativo for parecido com o do fundo atual, ele é o Master!
+                                    - Escolha a CHAVE da gaveta que melhor descreve o ativo baseando-se na definição dela. Se nenhuma servir, retorne 'Desenquadrado'.
                                     
                                     JSON EXATO: {{ "tipo_ativo": "NATUREZA", "gaveta_matematica": "CHAVE_OU_DESENQUADRADO" }}
                                     """
@@ -327,12 +319,11 @@ elif menu == "📉 Mesa de Operações":
                             
                             c_info1, c_info2 = st.columns(2)
                             c_info1.markdown(f"💰 **Volume Financeiro:** {format_br(op['valor'])}")
-                            
                             cor_g = "red" if op['gaveta_ia'] == 'Desenquadrado' else "green"
-                            c_info2.markdown(f"🔍 **Natureza Real:** {op['tipo_ativo_ia']}<br>🗄️ **Enquadramento no Fundo:** <span style='color:{cor_g}'><b>{op['gaveta_ia']}</b></span>", unsafe_allow_html=True)
+                            c_info2.markdown(f"🔍 **Natureza Real:** {op['tipo_ativo_ia']}<br>🗄️ **Enquadramento:** <span style='color:{cor_g}'><b>{op['gaveta_ia']}</b></span>", unsafe_allow_html=True)
                             
                             col_btn1, col_btn2, col_btn3 = st.columns([1, 1, 2])
-                            if col_btn1.button("✅ Aprovar", key=f"apr_{op['id']}"):
+                            if col_btn1.button("✅ Aprovar na Carteira", key=f"apr_{op['id']}"):
                                 ativo_existente = df_ativos[df_ativos['ativo'] == op['ativo']]
                                 if not ativo_existente.empty:
                                     id_carteira = ativo_existente.iloc[0]['id']
@@ -341,45 +332,39 @@ elif menu == "📉 Mesa de Operações":
                                     conn.table("carteira_diaria").update({"valor_mercado": novo_val}).eq("id", id_carteira).execute()
                                 else:
                                     conn.table("carteira_diaria").insert({"data": op['data'], "fundo_nome": fundo_ativo, "ativo": op['ativo'], "valor_mercado": float(op['valor']), "tipo_ativo": op['tipo_ativo_ia'], "gaveta_matematica": op['gaveta_ia']}).execute()
-                                
                                 conn.table("movimentacoes_ativo").update({"status": "Confirmada"}).eq("id", op['id']).execute()
                                 st.rerun()
-                                
                             if col_btn2.button("❌ Recusar", key=f"rec_{op['id']}"):
                                 conn.table("movimentacoes_ativo").update({"status": "Cancelada"}).eq("id", op['id']).execute()
                                 st.rerun()
-                                
                             with col_btn3.expander("✏️ Editar Valor"):
                                 novo_v = st.number_input("Corrigir", value=float(op['valor']), key=f"ed_{op['id']}")
                                 if st.button("Salvar", key=f"btn_ed_{op['id']}"):
                                     conn.table("movimentacoes_ativo").update({"valor": novo_v}).eq("id", op['id']).execute()
                                     st.rerun()
                             st.markdown('</div>', unsafe_allow_html=True)
-                    
                     st.divider()
                     st.markdown("### 📋 Trade Blotter (Histórico Geral)")
                     df_view_hist = df_hist[['data', 'tipo', 'ativo', 'valor', 'tipo_ativo_ia', 'gaveta_ia', 'status']].copy()
                     df_view_hist['valor'] = df_view_hist['valor'].apply(format_br)
                     st.dataframe(df_view_hist, use_container_width=True)
-                else: st.info("O Order Book está vazio para este fundo.")
-        else: st.warning("Importe a carteira base primeiro.")
+                else: st.info("Order Book vazio.")
 
 # --- 7. 📜 REGULAMENTO ---
 elif menu == "📜 Regulamento":
     st.subheader("📜 Arquiteto de Risco (CVM 175)")
-    upload_reg = st.file_uploader("Suba o PDF", type=['pdf'])
+    upload_reg = st.file_uploader("Suba o PDF do Regulamento", type=['pdf'])
     
     if upload_reg and st.button("🚀 Mapear Cérebro de Compliance"):
         with st.spinner("Análise Profunda ativada..."):
             try:
                 reader = PdfReader(upload_reg)
                 texto = "".join([p.extract_text() for p in reader.pages[:60]])
-                
                 prompt_reg = f"""
-                Auditor de Risco Sênior CVM. Transforme em JSON.
-                1. FOQUE nas regras PERMANENTES.
-                2. IGNORE carências iniciais.
-                JSON EXATO: {{ "fundo": "NOME COMPLETO", "cnpj": "CNPJ", "mandato": "Mandato", "regras": [{{ "id": "minimo", "tipo": "minimo_percentual", "limite_min": 0.67, "categorias": ["chave_1"] }}], "categorias_definidas": {{ "chave_1": "Descricao" }} }}
+                Auditor CVM. 
+                1. Extraia regras de enquadramento PERMANENTES.
+                2. CRIE 'categorias_definidas' EXPLICANDO o que cada gaveta significa (Ex: "Fundo SPX Hornet Master").
+                JSON EXATO: {{ "fundo": "NOME COMPLETO", "cnpj": "CNPJ", "mandato": "Mandato", "regras": [{{ "id": "minimo", "tipo": "minimo_percentual", "limite_min": 0.67, "categorias": ["chave_1"] }}], "categorias_definidas": {{ "chave_1": "Definicao detalhada" }} }}
                 TEXTO: {texto[:35000]}
                 """
                 res, motor = chamar_ia_hydra(prompt_reg)
@@ -387,7 +372,7 @@ elif menu == "📜 Regulamento":
                 if data:
                     st.session_state['schema_reg'] = data
                     st.json(data)
-                else: st.error("IA falhou na extração.")
+                else: st.error("Erro na extração.")
             except Exception as e: st.error(f"Erro: {e}")
 
     if 'schema_reg' in st.session_state and st.button("💾 Ativar Compliance"):
@@ -397,6 +382,6 @@ elif menu == "📜 Regulamento":
             "regras_json": d.get('regras', []), "categorias_definidas": d.get('categorias_definidas', {})
         }
         conn.table("regulamentos").upsert(payload, on_conflict="fundo_nome").execute()
-        st.success("Motor matemático ativado!")
+        st.success("Motor ativado!")
         del st.session_state['schema_reg']
         st.rerun()
