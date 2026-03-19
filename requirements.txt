@@ -1,6 +1,7 @@
 streamlit
-st-supabase-connection
-google-generativeai==0.8.3
 pandas
-openpyxl
+st-supabase-connection
+google-generativeai
 pypdf
+requests
+yfinance
